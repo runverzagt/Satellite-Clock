@@ -10,7 +10,9 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_hal::{clock::CpuClock, gpio::Pull};
+use esp_hal::gpio::{Output, OutputConfig, Level};
+use esp_hal::mcpwm::timer::PeriodUpdatingMethod;
+use esp_hal::{clock::CpuClock};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::time::Rate;
 use esp_hal::rmt::{PulseCode, Rmt};
@@ -54,13 +56,15 @@ async fn main(spawner: Spawner) -> ! {
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).expect("Failed to init RMT0");
     let rmt_buffer: &'static mut [PulseCode; buffer_size(1)] = RMT_BUFF.init(smart_led_buffer!(NUM_LEDS));
     let rgb_led = SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO8, rmt_buffer);
+    let discrete_led = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
 
     // Spawn some tasks
     spawner.spawn(rgb_task(rgb_led)).unwrap();
+    spawner.spawn(blink_task(discrete_led)).unwrap();
 
     loop {
-        info!("Hello World!");
-        Timer::after(Duration::from_secs(1)).await;
+        // Main loop doesn't do anything, but must await to allow tasks to run
+        Timer::after_millis(1000).await;
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0/examples
@@ -76,6 +80,8 @@ async fn rgb_task(mut led: SmartLedsAdapter<'static, { buffer_size(NUM_LEDS) }>)
     };
     let mut data: RGB8;
 
+    info!("rgb_task started");
+
     loop {
         // Rotate through the hues
         for hue in 0..=255 {
@@ -85,6 +91,50 @@ async fn rgb_task(mut led: SmartLedsAdapter<'static, { buffer_size(NUM_LEDS) }>)
             led.write(brightness(gamma([data].into_iter()), LEVEL)).unwrap();
 
             Timer::after_millis(20).await;
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn blink_task(mut led: Output<'static>) {
+    enum LedStates {
+        ON1,
+        OFF1,
+        ON2,
+        OFF2,
+    }
+    const BLINK_DURATION: u64 = 100;
+    const BLINK_PAUSE: u64 = 1000 - (3 * BLINK_DURATION);
+
+    let mut state: LedStates = LedStates::OFF2;
+    led.set_low();
+
+    
+    info!("blink_task started");
+
+    loop {
+        match state {
+            LedStates::ON1 => {
+                led.set_high();
+                state = LedStates::OFF1;
+                Timer::after_millis(BLINK_DURATION).await;
+            },
+            LedStates::OFF1 => {
+                led.set_low();
+                state = LedStates::ON2;
+                Timer::after_millis(BLINK_DURATION).await;
+            },
+            LedStates::ON2 => {
+                led.set_high();
+                state = LedStates::OFF2;
+                Timer::after_millis(BLINK_DURATION).await;
+            },
+            LedStates::OFF2 => {
+                led.toggle();
+                state = LedStates::ON1;
+                Timer::after_millis(BLINK_PAUSE).await;
+            }
+
         }
     }
 }
