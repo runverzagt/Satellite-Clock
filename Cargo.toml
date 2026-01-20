@@ -25,6 +25,7 @@ static_cell      = "2.1.1"
 esp-hal-smartled = "0.17.0"
 esp32c6 = "0.22.0"
 smart-leds = "0.4.0"
+embassy-sync = "0.7.2"
 
 
 [profile.dev]

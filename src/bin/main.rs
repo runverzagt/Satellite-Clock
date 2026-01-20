@@ -11,13 +11,15 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{Output, OutputConfig, Level};
-use esp_hal::mcpwm::timer::PeriodUpdatingMethod;
-use esp_hal::{clock::CpuClock};
+use esp_hal::mcpwm::timer::PwmWorkingMode;
+use esp_hal::mcpwm::{PeripheralClockConfig, McPwm, operator::{PwmPinConfig, PwmPin}};
+use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::time::Rate;
 use esp_hal::rmt::{PulseCode, Rmt};
 use esp_println as _;
 use esp_hal_smartled::{SmartLedsAdapter, smart_led_buffer, buffer_size};
+use esp32c6::MCPWM0;
 use smart_leds::{RGB8, SmartLedsWrite, brightness, gamma, hsv::{Hsv, hsv2rgb}};
 use static_cell::StaticCell;
 
@@ -28,7 +30,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 // Create static memory for the RMT Buffer
 const NUM_LEDS: usize = 1;
-static RMT_BUFF: StaticCell<[PulseCode; buffer_size(NUM_LEDS)]> = StaticCell::new();
+type RmtBuffType = [PulseCode; buffer_size(NUM_LEDS)];
+static RMT_BUFF: StaticCell<RmtBuffType> = StaticCell::new();
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -43,6 +46,7 @@ async fn main(spawner: Spawner) -> ! {
     // generator version: 1.2.0
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).expect("Unable to get peripheral clock");
     let peripherals = esp_hal::init(config);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -54,9 +58,16 @@ async fn main(spawner: Spawner) -> ! {
 
     // Initalize peripherals
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).expect("Failed to init RMT0");
-    let rmt_buffer: &'static mut [PulseCode; buffer_size(1)] = RMT_BUFF.init(smart_led_buffer!(NUM_LEDS));
+    let rmt_buffer: &'static mut RmtBuffType = RMT_BUFF.init(smart_led_buffer!(NUM_LEDS));
     let rgb_led = SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO8, rmt_buffer);
-    let discrete_led = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
+    let mut mcpwm: McPwm<'_, esp_hal::peripherals::MCPWM0<'_>> = McPwm::new(peripherals.MCPWM0, clock_cfg);
+    mcpwm.operator0.set_timer(&mcpwm.timer0);
+    let discrete_led: PwmPin<'_, esp_hal::peripherals::MCPWM0<'_>, 0, true> = mcpwm.operator0.with_pin_a(peripherals.GPIO10, PwmPinConfig::UP_ACTIVE_HIGH);
+    let timer_clock_cfg = clock_cfg
+        .timer_clock_with_frequency(99, PwmWorkingMode::Increase, Rate::from_khz(20))
+        .unwrap();
+    mcpwm.timer0.start(timer_clock_cfg);
+
 
     // Spawn some tasks
     spawner.spawn(rgb_task(rgb_led)).unwrap();
@@ -96,45 +107,10 @@ async fn rgb_task(mut led: SmartLedsAdapter<'static, { buffer_size(NUM_LEDS) }>)
 }
 
 #[embassy_executor::task]
-async fn blink_task(mut led: Output<'static>) {
-    enum LedStates {
-        ON1,
-        OFF1,
-        ON2,
-        OFF2,
-    }
-    const BLINK_DURATION: u64 = 100;
-    const BLINK_PAUSE: u64 = 1000 - (3 * BLINK_DURATION);
-
-    let mut state: LedStates = LedStates::OFF2;
-    led.set_low();
-
-    
-    info!("blink_task started");
-
+async fn blink_task(mut led: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 0, true>) {
     loop {
-        match state {
-            LedStates::ON1 => {
-                led.set_high();
-                state = LedStates::OFF1;
-                Timer::after_millis(BLINK_DURATION).await;
-            },
-            LedStates::OFF1 => {
-                led.set_low();
-                state = LedStates::ON2;
-                Timer::after_millis(BLINK_DURATION).await;
-            },
-            LedStates::ON2 => {
-                led.set_high();
-                state = LedStates::OFF2;
-                Timer::after_millis(BLINK_DURATION).await;
-            },
-            LedStates::OFF2 => {
-                led.toggle();
-                state = LedStates::ON1;
-                Timer::after_millis(BLINK_PAUSE).await;
-            }
-
+        for brightness in 1..=255 {
+            led.set_timestamp(brightness);
         }
     }
 }
