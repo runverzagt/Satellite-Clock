@@ -9,8 +9,7 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
-use esp_hal::gpio::{Output, OutputConfig, Level};
+use embassy_time::{Timer};
 use esp_hal::mcpwm::timer::PwmWorkingMode;
 use esp_hal::mcpwm::{PeripheralClockConfig, McPwm, operator::{PwmPinConfig, PwmPin}};
 use esp_hal::clock::CpuClock;
@@ -19,7 +18,6 @@ use esp_hal::time::Rate;
 use esp_hal::rmt::{PulseCode, Rmt};
 use esp_println as _;
 use esp_hal_smartled::{SmartLedsAdapter, smart_led_buffer, buffer_size};
-use esp32c6::MCPWM0;
 use smart_leds::{RGB8, SmartLedsWrite, brightness, gamma, hsv::{Hsv, hsv2rgb}};
 use static_cell::StaticCell;
 
@@ -45,10 +43,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.2.0
 
+    // NOTE: MUST init esp_hal before doing anything else
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).expect("Unable to get peripheral clock");
     let peripherals = esp_hal::init(config);
 
+    let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).expect("Unable to get peripheral clock");
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
@@ -108,9 +107,20 @@ async fn rgb_task(mut led: SmartLedsAdapter<'static, { buffer_size(NUM_LEDS) }>)
 
 #[embassy_executor::task]
 async fn blink_task(mut led: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 0, true>) {
+    const MAX_BRIGHTNESS: u16 = 100;
+    const FLASH_PERIOD_MS: u64 = 1200;
+    const FLASH_STEP_LENGTH_MS: u64 = (FLASH_PERIOD_MS) / (2 * MAX_BRIGHTNESS as u64);
+    const PAUSE_DURATION_MS : u64 = 200;
+
     loop {
-        for brightness in 1..=255 {
+        for brightness in 0..=MAX_BRIGHTNESS {
             led.set_timestamp(brightness);
+            Timer::after_millis(FLASH_STEP_LENGTH_MS).await;
         }
+        for brightness in (0..=MAX_BRIGHTNESS).rev() {
+            led.set_timestamp(brightness);
+            Timer::after_millis(FLASH_STEP_LENGTH_MS).await;
+        }
+            Timer::after_millis(PAUSE_DURATION_MS).await;
     }
 }
