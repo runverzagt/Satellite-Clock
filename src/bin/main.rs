@@ -7,9 +7,10 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use defmt::{debug, info};
+use defmt::{info};
 use embassy_executor::Spawner;
 use embassy_time::Timer;
+use esp_hal::Blocking;
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::DriveMode;
 use esp_hal::ledc::{
@@ -17,6 +18,7 @@ use esp_hal::ledc::{
     channel::{self, ChannelIFace},
     timer::{self, TimerIFace},
 };
+use esp_hal::i2c::master::{Config,I2c};
 use esp_hal::rmt::{PulseCode, Rmt};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
@@ -25,6 +27,15 @@ use esp_println as _;
 use smart_leds::{
     RGB8, SmartLedsWrite, brightness, gamma,
     hsv::{Hsv, hsv2rgb},
+};
+use ssd1306::prelude::DisplayRotation;
+use ssd1306::size::DisplaySize128x32;
+use ssd1306::{I2CDisplayInterface, Ssd1306};
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::{Baseline, Text},
 };
 use static_cell::StaticCell;
 
@@ -89,10 +100,15 @@ async fn main(spawner: Spawner) -> ! {
         })
         .expect("unable to configure pwm_channel0");
 
+    // Configure i2c
+    let i2c = I2c::new(peripherals.I2C0, Config::default()).unwrap()
+        .with_sda(peripherals.GPIO6)
+        .with_scl(peripherals.GPIO7);
+
     // Spawn tasks
     spawner.spawn(rgb_task(rgb_led)).unwrap();
     spawner.spawn(blink_task(pwm_channel0)).unwrap();
-
+    spawner.must_spawn(display_task(i2c));
     loop {
         // Main loop doesn't do anything, but must await to allow tasks to run
         Timer::after_millis(1000).await;
@@ -131,7 +147,7 @@ async fn rgb_task(mut led: SmartLedsAdapter<'static, { buffer_size(NUM_LEDS) }>)
 #[embassy_executor::task]
 async fn blink_task(led: esp_hal::ledc::channel::Channel<'static, LowSpeed>) {
     const MAX_BRIGHTNESS: u8 = 100;
-    const FLASH_PERIOD_MS: u64 = 1200;
+    const FLASH_PERIOD_MS: u64 = 1500;
     const FLASH_STEP_LENGTH_MS: u64 = (FLASH_PERIOD_MS) / (2 * MAX_BRIGHTNESS as u64);
     const PAUSE_DURATION_MS: u64 = 600;
 
@@ -147,5 +163,31 @@ async fn blink_task(led: esp_hal::ledc::channel::Channel<'static, LowSpeed>) {
             Timer::after_millis(FLASH_STEP_LENGTH_MS).await;
         }
         Timer::after_millis(PAUSE_DURATION_MS).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn display_task(i2c: I2c<'static, Blocking>) {
+    let interface = I2CDisplayInterface::new(i2c);
+    let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+
+    let text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
+    Text::with_baseline("Hello World!", Point::zero(), text_style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+
+    Text::with_baseline("Hello Rust!", Point::new(0, 16), text_style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+
+    display.flush().unwrap();
+
+    loop {
+        Timer::after_millis(1000).await;
     }
 }
