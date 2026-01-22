@@ -24,6 +24,7 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal_smartled::{SmartLedsAdapter, buffer_size, smart_led_buffer};
 use esp_println as _;
+use numtoa::NumToA;
 use smart_leds::{
     RGB8, SmartLedsWrite, brightness, gamma,
     hsv::{Hsv, hsv2rgb},
@@ -179,17 +180,38 @@ async fn display_task(i2c: I2c<'static, Blocking>) {
         .text_color(BinaryColor::On)
         .build();
 
-    Text::with_baseline("Hello World!", Point::zero(), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
+    let clearing_text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::Off)
+        .build();
 
-    Text::with_baseline("Hello Rust!", Point::new(0, 16), text_style, Baseline::Top)
+    Text::with_baseline("Hello World!", Point::zero(), text_style, Baseline::Top)
         .draw(&mut display)
         .unwrap();
 
     display.flush().unwrap();
 
+    let mut counter = 0;
+    let mut buf = [0u8; 5];
+
+    info!("display_task started");
+
     loop {
+        Text::with_baseline(counter.numtoa_str(10, &mut buf), Point::new(0, 16), text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
+        display.flush().unwrap();
+
         Timer::after_millis(1000).await;
+
+        Text::with_baseline(counter.numtoa_str(10, &mut buf), Point::new(0, 16), clearing_text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
+
+        if counter < 100 {
+            counter += 1;
+        } else {
+            counter = 0;
+        }
     }
 }

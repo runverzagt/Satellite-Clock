@@ -1059,6 +1059,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "numtoa"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a6da8d50bd4f4b2e9788c44714a3fa4e465d33fd6a6ad70991db6eb30807dca"
+
+[[package]]
 name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1221,6 +1227,7 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "esp32c6",
+ "numtoa",
  "smart-leds",
  "ssd1306",
  "static_cell",
