@@ -28,6 +28,7 @@ use smart_leds::{
     RGB8, SmartLedsWrite, brightness, gamma,
     hsv::{Hsv, hsv2rgb},
 };
+use ssd1306::mode::DisplayConfig;
 use ssd1306::prelude::DisplayRotation;
 use ssd1306::size::DisplaySize128x32;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
@@ -169,8 +170,9 @@ async fn blink_task(led: esp_hal::ledc::channel::Channel<'static, LowSpeed>) {
 #[embassy_executor::task]
 async fn display_task(i2c: I2c<'static, Blocking>) {
     let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
+    let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate180)
         .into_buffered_graphics_mode();
+    display.init().unwrap();
 
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_6X10)
