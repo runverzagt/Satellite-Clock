@@ -29,6 +29,7 @@ embassy-sync = "0.7.2"
 ssd1306 = "0.10.0"
 embedded-graphics = { version = "0.8.1", features = ["defmt"] }
 numtoa = "0.3.1"
+libm = "0.2.15"
 
 
 [profile.dev]

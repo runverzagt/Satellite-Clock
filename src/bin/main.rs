@@ -7,9 +7,12 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use core::f32::consts::PI;
+
 use defmt::{info};
 use embassy_executor::Spawner;
 use embassy_time::Timer;
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, Line};
 use esp_hal::Blocking;
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::DriveMode;
@@ -24,6 +27,7 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal_smartled::{SmartLedsAdapter, buffer_size, smart_led_buffer};
 use esp_println as _;
+use libm::sincosf;
 use numtoa::NumToA;
 use smart_leds::{
     RGB8, SmartLedsWrite, brightness, gamma,
@@ -175,43 +179,48 @@ async fn display_task(i2c: I2c<'static, Blocking>) {
         .into_buffered_graphics_mode();
     display.init().unwrap();
 
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
-        .text_color(BinaryColor::On)
-        .build();
+    let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let thin_stroke_off = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+    let fill_style = PrimitiveStyle::with_fill(BinaryColor::On);
 
-    let clearing_text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
-        .text_color(BinaryColor::Off)
-        .build();
-
-    Text::with_baseline("Hello World!", Point::zero(), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-
-    display.flush().unwrap();
-
-    let mut counter = 0;
-    let mut buf = [0u8; 5];
-
+    static CENTER: Point = Point::new(3, 10);
+    const FRAME_PERIOD_MS: u64 = 30;
+    const SCANNER_PERIOD_MS: u64 = 2000;
+    let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
+    let mut angle: f32 = angle_update;
     info!("display_task started");
 
     loop {
-        Text::with_baseline(counter.numtoa_str(10, &mut buf), Point::new(0, 16), text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
+        Circle::new(CENTER - convert_tl_to_center(20), 20)
+            .into_styled(thin_stroke)
+            .draw(&mut display).unwrap();
+        Circle::new(CENTER - convert_tl_to_center(32), 32)
+            .into_styled(thin_stroke)
+            .draw(&mut display).unwrap();
+        Circle::new(CENTER - convert_tl_to_center(44), 44)
+            .into_styled(thin_stroke)
+            .draw(&mut display).unwrap();
+        Circle::new(CENTER - convert_tl_to_center(56), 56)
+            .into_styled(thin_stroke)
+            .draw(&mut display).unwrap();
+        let (end_x, end_y) = sincosf(angle);
+        let line = Line::new(CENTER, CENTER+Point::new(((28 as f32) * end_x) as i32, ((28 as f32) * end_y) as i32));
+        line.into_styled(thin_stroke)
+            .draw(&mut display).unwrap();
+
         display.flush().unwrap();
+        line.into_styled(thin_stroke_off)
+            .draw(&mut display).unwrap();
 
-        Timer::after_millis(1000).await;
-
-        Text::with_baseline(counter.numtoa_str(10, &mut buf), Point::new(0, 16), clearing_text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
-
-        if counter < 100 {
-            counter += 1;
-        } else {
-            counter = 0;
+        angle += angle_update;
+        if angle > (2f32 * PI) {
+            angle = 0f32;
         }
+        Timer::after_millis(FRAME_PERIOD_MS).await;
     }
+}
+
+// Create a point representing an offset from the top-left of a circle to its center
+fn convert_tl_to_center(d: i32) -> Point {
+    Point::new(d/2, d/2)
 }
