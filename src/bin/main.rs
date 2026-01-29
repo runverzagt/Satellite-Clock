@@ -24,6 +24,7 @@ use chrono::{Date, DateTime, Datelike, TimeZone, Timelike, Utc, Weekday};
 use core::net::{IpAddr, SocketAddr};
 use heapless::String;
 use core::fmt::Write;
+use thiserror_no_std::Error;
 
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -73,13 +74,15 @@ use ssd1306::prelude::DisplayRotation;
 use ssd1306::size::DisplaySize128x32;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    mono_font::{ascii::*, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
     prelude::*,
     text::{Baseline, Text},
 };
 use static_cell::StaticCell;
 
+
+// NTP Client implementation heavily inspired by https://github.com/vpikulik/sntpc_embassy/tree/main
 #[derive(Copy, Clone, Default)]
 struct Timestamp{
     duration: Duration,
@@ -97,6 +100,35 @@ impl NtpTimestampGenerator for Timestamp {
 
     fn timestamp_subsec_micros(&self) -> u32 {
         (self.duration.as_micros() - (self.duration.as_secs() * 1_000_000)) as u32
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum SntpcError {
+    #[error("to_socket_addrs")]
+    ToSocketAddrs,
+    #[error("no addr")]
+    NoAddr,
+    #[error("udp send")]
+    UdpSend,
+    #[error("dns query error")]
+    DnsQuery(#[from] embassy_net::dns::Error),
+    #[error("dns query error")]
+    DnsEmptyResponse,
+    #[error("sntc")]
+    Sntc(#[from] sntpc::Error),
+    #[error("can not parse ntp response")]
+    BadNtpResponse,
+}
+
+impl From<SntpcError> for sntpc::Error {
+    fn from(err: SntpcError) -> Self {
+        match err {
+            SntpcError::ToSocketAddrs => Self::AddressResolve,
+            SntpcError::NoAddr => Self::AddressResolve,
+            SntpcError::UdpSend => Self::Network,
+            _ => todo!(),
+        }
     }
 }
 
@@ -204,9 +236,10 @@ async fn main(spawner: Spawner) -> ! {
 
     wait_for_connection(stack).await;
 
+    spawner.must_spawn(ntp_worker(stack, clock));
+
     loop {
-        access_website(stack, seed, clock).await;
-        Timer::after_millis(5000).await;
+        Timer::after_secs(300).await;
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0/examples
@@ -274,12 +307,12 @@ async fn display_task(i2c: I2c<'static, Blocking>,
     let thin_stroke_off = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
 
     let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
+        .font(&FONT_7X13)
         .text_color(BinaryColor::On)
         .build();
 
     let clearing_text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
+        .font(&FONT_7X13)
         .text_color(BinaryColor::Off)
         .build();
 
@@ -407,11 +440,33 @@ async fn wait_for_connection(stack: embassy_net::Stack<'_>) {
     }
 }
 
-async fn access_website(
-    stack: embassy_net::Stack<'_>,
-    tls_seed: u64,
+#[embassy_executor::task]
+pub async fn ntp_worker(
+    stack: embassy_net::Stack<'static>,
     clock: &'static Clock,
 ) {
+    loop {
+        info!("NTP Request");
+        let sleep_sec = match ntp_request(stack,  clock).await {
+            Err(_) => {
+                error!("NTP error Response");
+                10
+            }
+            Ok(_) => 3600,
+        };
+        Timer::after(Duration::from_secs(sleep_sec)).await;
+    }
+}
+
+async fn ntp_request  (
+    stack: embassy_net::Stack<'_>,
+    clock: &'static Clock,
+) -> Result<(), SntpcError> {
+    info!("Prepare NTP lookup");
+    let mut ip_addr = stack.dns_query(HOST, dns::DnsQueryType::A).await?;
+    let addr= ip_addr.pop().ok_or(SntpcError::DnsEmptyResponse)?;
+    info!("NTP DNS: {:?}", addr);
+
     const BUFF_SZ: usize = 4096;
     const HOST: &str = "pool.ntp.org";
     let mut rx_meta = [PacketMetadata::EMPTY; 16];
@@ -420,20 +475,16 @@ async fn access_website(
     let mut tx_buffer = [0; BUFF_SZ];
 
     let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
-    socket.bind(123).unwrap();
+    socket.bind(123).expect("Unable to bind to UDP socket");
     let socket = UdpSocketWrapper::new(socket);
     let context = NtpContext::new(Timestamp::default());
 
-    let ip_addr = stack.dns_query(HOST, dns::DnsQueryType::A)
-        .await
-        .expect("Unable to get IP address for NTP server");
-    let addr: IpAddr = ip_addr[0].into();
-    let result = get_time(SocketAddr::from((addr, 123)), &socket, context)
-        .await
-        .expect("Unable to get time");
+    let result = get_time(SocketAddr::from((addr, 123)), &socket, context).await?;
     info!("NTP response seconds: {}", result.seconds);
-    let now = DateTime::from_timestamp(result.seconds as i64, 0).unwrap();
+    let now = DateTime::from_timestamp(result.seconds as i64, 0).ok_or(SntpcError::BadNtpResponse)?;
     clock.set_time(now).await;
+
+    Ok(())
 }
 
 struct Clock {
