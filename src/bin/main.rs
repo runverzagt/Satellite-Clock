@@ -192,17 +192,17 @@ async fn main(spawner: Spawner) -> ! {
         seed,
     );
 
+    static CLOCK: StaticCell<Clock> = StaticCell::new();
+    let clock = CLOCK.init(Clock::new());
+
     // Spawn tasks
     spawner.spawn(rgb_task(rgb_led)).unwrap();
     spawner.spawn(blink_task(pwm_channel0)).unwrap();
-    spawner.must_spawn(display_task(i2c));
+    spawner.must_spawn(display_task(i2c, clock));
     spawner.must_spawn(connection(controller));
     spawner.must_spawn(net_task(runner));
 
     wait_for_connection(stack).await;
-
-    static CLOCK: StaticCell<Clock> = StaticCell::new();
-    let clock = CLOCK.init(Clock::new());
 
     loop {
         access_website(stack, seed, clock).await;
@@ -262,7 +262,9 @@ async fn blink_task(led: esp_hal::ledc::channel::Channel<'static, LowSpeed>) {
 }
 
 #[embassy_executor::task]
-async fn display_task(i2c: I2c<'static, Blocking>) {
+async fn display_task(i2c: I2c<'static, Blocking>,
+    clock: &'static Clock,
+) {
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate180)
         .into_buffered_graphics_mode();
@@ -271,7 +273,18 @@ async fn display_task(i2c: I2c<'static, Blocking>) {
     let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let thin_stroke_off = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
 
+    let text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
+    let clearing_text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::Off)
+        .build();
+
     static CENTER: Point = Point::new(13, 10);
+    static CLOCK_POS:Point = Point::new(60, 10);
     const FRAME_PERIOD_MS: u64 = 30;
     const SCANNER_PERIOD_MS: u64 = 3000;
     let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
@@ -301,11 +314,21 @@ async fn display_task(i2c: I2c<'static, Blocking>) {
         line.into_styled(thin_stroke)
             .draw(&mut display).expect("Unable to draw line");
 
+        let time = clock.get_date_time_str().await;
+
+        Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
+
         display.flush().expect("Unable to flush display");
 
         // Clear the radio line in preperation of drawing the next frame
         line.into_styled(thin_stroke_off)
             .draw(&mut display).expect("Unable to UNdraw line");
+
+        Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
 
         // Update the angle for the next frame
         angle -= angle_update;
@@ -347,16 +370,6 @@ async fn connection(mut controller: WifiController<'static>) {
             info!("Wifi config returned: {:?}", res);
             let res = controller.start_async().await;
             info!("Wifi startup returned: {:?}", res);
-
-            info!("Scan");
-            let scan_config = ScanConfig::default().with_max(10);
-            let result = controller
-                .scan_with_config_async(scan_config)
-                .await
-                .expect("Unable to set controller to scan");
-            for ap in result {
-                info!("{:?}", ap);
-            }
         }
         info!("About to connect....");
 
@@ -411,14 +424,16 @@ async fn access_website(
     let socket = UdpSocketWrapper::new(socket);
     let context = NtpContext::new(Timestamp::default());
 
-    let ip_addr = stack.dns_query(HOST, dns::DnsQueryType::A).await.unwrap();
+    let ip_addr = stack.dns_query(HOST, dns::DnsQueryType::A)
+        .await
+        .expect("Unable to get IP address for NTP server");
     let addr: IpAddr = ip_addr[0].into();
-    let result = get_time(SocketAddr::from((addr, 123)), &socket, context).await.unwrap();
+    let result = get_time(SocketAddr::from((addr, 123)), &socket, context)
+        .await
+        .expect("Unable to get time");
     info!("NTP response seconds: {}", result.seconds);
     let now = DateTime::from_timestamp(result.seconds as i64, 0).unwrap();
     clock.set_time(now).await;
-
-    info!("Current time: {}", clock.get_date_time_str().await.as_str());
 }
 
 struct Clock {
@@ -465,8 +480,7 @@ impl Clock {
         let seconds = dt.second();
 
         let mut result = String::<10>::new();
-        //let time_delimiter = if seconds % 2 == 0 { ":" } else { " " };
-        let time_delimiter = ":";
+        let time_delimiter = if seconds % 2 == 0 { ":" } else { " " };
         write!(result, "{day_title} {hours:02}{time_delimiter}{minutes:02}").unwrap();
         result
     }
