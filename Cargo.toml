@@ -1,11 +1,11 @@
 [package]
 edition      = "2024"
-name         = "rgb-blinky-async"
+name         = "Satellite-Clock"
 rust-version = "1.88"
 version      = "0.1.0"
 
 [[bin]]
-name = "rgb-blinky-async"
+name = "Satellite-Clock"
 path = "./src/main.rs"
 
 [dependencies]
@@ -22,9 +22,7 @@ esp-println      = { version = "0.16.1", features = ["defmt-espflash", "esp32c6"
 
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
-esp-hal-smartled = "0.17.0"
 esp32c6 = "0.22.0"
-smart-leds = "0.4.0"
 embassy-sync = "0.7.2"
 ssd1306 = "0.10.0"
 embedded-graphics = { version = "0.8.1", features = ["defmt"] }
@@ -36,15 +34,13 @@ trouble-host = { version = "0.5.1", features = ["default-packet-pool-mtu-255", "
 esp-backtrace = { version = "0.18.1", features = ["esp32c6", "panic-handler", "println"] }
 esp-alloc = { version = "0.9.0", features = ["esp32c6"] }
 esp-radio = { version = "0.17.0", features = ["wifi", "unstable", "ble", "coex", "esp32c6", "defmt"] }
-reqwless = { version = "0.14.0", default-features = false, features = [
-    "embedded-tls"
-] }
 sntpc = { version = "0.8.1", default-features = false, features = ["defmt", "sync"] }
 sntpc-net-embassy = { version = "0.8.0", default-features = false,  features = ["defmt"] }
 chrono = { version = "0.4", default-features = false}
 heapless = { version = "0.7.15", features = ["serde"] }
 thiserror-no-std = "2.0.2"
 no-std-net = "0.6.0"
+display-interface = { version = "0.5.0", features = ["defmt-03"] }
 
 [profile.dev]
 # Rust debug is too slow.

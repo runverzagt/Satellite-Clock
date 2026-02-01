@@ -12,7 +12,7 @@ use time::{Clock, ntp_worker};
 
 use core::f32::consts::PI;
 
-use defmt::{info, };
+use defmt::{info, error};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
 use embassy_net::{Runner, StackResources, };
@@ -54,9 +54,7 @@ use embedded_graphics::{
 use static_cell::StaticCell;
 
 // Define the timestamp for defmt
-defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() / 3600}, {embassy_time::Instant::now().as_secs() % 3600}, embassy_time::Instant::now().as_secs() % 60);
-
-// static SIGNAL: Signal<CriticalSectionRawMutex, Button> = Signal::new();
+defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() / 3600}, {(embassy_time::Instant::now().as_secs() % 3600) / 60}, embassy_time::Instant::now().as_secs() % 60);
 
 // WIFI info
 const SSID: &str = env!("SSID");
@@ -133,9 +131,7 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn display_task(i2c: I2c<'static, Blocking>,
-    clock: &'static Clock,
-) {
+async fn display_task(i2c: I2c<'static, Blocking>, clock: &'static Clock) {
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate180)
         .into_buffered_graphics_mode();
@@ -191,7 +187,7 @@ async fn display_task(i2c: I2c<'static, Blocking>,
             .draw(&mut display)
             .unwrap();
 
-        display.flush().expect("Unable to flush display");
+        display.flush().unwrap_or_else(|e| error!("{:?}", e));
 
         // Clear the radio line in preperation of drawing the next frame
         line.into_styled(thin_stroke_off)
