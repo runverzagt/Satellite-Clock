@@ -1,14 +1,13 @@
 use defmt::{info, error};
 use embassy_net::{dns};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use embassy_time::{Duration, Timer, Instant, with_timeout, TimeoutError};
+use embassy_time::{Duration, Timer, Instant, with_timeout};
 use embassy_net::{ udp::{PacketMetadata, UdpSocket}};
-use esp_radio::wifi::{ClientConfig, PowerSaveMode, WifiStaState};
-use esp_radio::wifi::WifiApState;
-use sntpc::{get_time, NtpContext, NtpTimestampGenerator, sntp_send_request, sntp_process_response};
+use esp_radio::wifi::{WifiStaState};
+use sntpc::{get_time, NtpContext, NtpTimestampGenerator};
 use sntpc_net_embassy::UdpSocketWrapper;
 use chrono::{ DateTime, Datelike, Timelike, Utc, Weekday};
-use core::net::{Ipv4Addr, SocketAddr};
+use core::{fmt::Debug, net::{SocketAddr}};
 use heapless::String;
 use core::fmt::Write;
 use thiserror_no_std::Error;
@@ -40,7 +39,7 @@ impl NtpTimestampGenerator for Timestamp {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, defmt::Format)]
 pub enum SntpcError {
     #[error("to_socket_addrs")]
     ToSocketAddrs,
@@ -111,8 +110,8 @@ impl Clock {
             Weekday::Sun => "Sun",
         };
         let hours = dt.hour();
-        let minutes = dt.minute();
-        let seconds = dt.second();
+        let minutes = dt.minute() % 60;
+        let seconds = dt.second() % 60;
 
         let mut result = String::<10>::new();
         let time_delimiter = if seconds % 2 == 0 { ":" } else { " " };
@@ -127,22 +126,20 @@ pub async fn ntp_worker(
     clock: &'static Clock,
 ) {
     loop {
-        let sleep_sec : u64;
-        match esp_radio::wifi::sta_state() {
+        let sleep_sec : u64 = match esp_radio::wifi::sta_state() {
             WifiStaState::Connected => {
                 info!("NTP Request");
-                sleep_sec = match ntp_request(stack,  clock).await {
-                    Err(_) => {
-                        error!("NTP error Response");
+                match ntp_request(stack,  clock).await {
+                    Err(e) => {
+                        error!("NTP error Response: {:?}", e);
                         10
                     }
                     Ok(_) => 3600,
-                };
+                }
             }
-            _ => {
-                sleep_sec = 600;
-            }
-        }
+            // If the wifi isn't connected, sleep for 1 minute to see if it comes up
+            _ => 600,
+        };
         Timer::after(Duration::from_secs(sleep_sec)).await;
     }
 }
@@ -176,7 +173,7 @@ async fn ntp_request  (
 
     info!("Requesting time...");
     let result = match with_timeout(Duration::from_secs(60), get_time(s_addr, &socket_wrapper, context)).await {
-        Ok(a) => a.unwrap(),
+        Ok(a) => a?,
         Err(_) => return Err(SntpcError::NetworkTimeout)
     };
     info!("NTP response seconds: {}, Roundtrip: {}us", result.seconds, result.roundtrip());
