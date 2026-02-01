@@ -6,7 +6,7 @@ version      = "0.1.0"
 
 [[bin]]
 name = "rgb-blinky-async"
-path = "./src/bin/main.rs"
+path = "./src/main.rs"
 
 [dependencies]
 esp-hal = { version = "~1.0", features = ["defmt", "esp32c6", "unstable"] }
@@ -36,28 +36,15 @@ trouble-host = { version = "0.5.1", features = ["default-packet-pool-mtu-255", "
 esp-backtrace = { version = "0.18.1", features = ["esp32c6", "panic-handler", "println"] }
 esp-alloc = { version = "0.9.0", features = ["esp32c6"] }
 esp-radio = { version = "0.17.0", features = ["wifi", "unstable", "ble", "coex", "esp32c6", "defmt"] }
-smoltcp = { version = "0.12.0", default-features = false, features = [
-    "defmt",
-    "medium-ethernet",
-    "multicast",
-    "proto-dhcpv4",
-    "proto-dns",
-    "proto-ipv4",
-    "socket-dns",
-    "socket-icmp",
-    "socket-raw",
-    "socket-tcp",
-    "socket-udp",
-    "dns-max-server-count-4", 
-] }
 reqwless = { version = "0.14.0", default-features = false, features = [
     "embedded-tls"
 ] }
-sntpc = { version = "0.8.1", default-features = false,  features = ["defmt"] }
+sntpc = { version = "0.8.1", default-features = false, features = ["defmt", "sync"] }
 sntpc-net-embassy = { version = "0.8.0", default-features = false,  features = ["defmt"] }
 chrono = { version = "0.4", default-features = false}
 heapless = { version = "0.7.15", features = ["serde"] }
 thiserror-no-std = "2.0.2"
+no-std-net = "0.6.0"
 
 [profile.dev]
 # Rust debug is too slow.
