@@ -110,8 +110,8 @@ impl Clock {
             Weekday::Sun => "Sun",
         };
         let hours = dt.hour();
-        let minutes = dt.minute() % 60;
-        let seconds = dt.second() % 60;
+        let minutes = dt.minute();
+        let seconds = dt.second();
 
         let mut result = String::<10>::new();
         let time_delimiter = if seconds % 2 == 0 { ":" } else { " " };

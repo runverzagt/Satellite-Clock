@@ -54,7 +54,7 @@ use embedded_graphics::{
 use static_cell::StaticCell;
 
 // Define the timestamp for defmt
-defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() / 3600}, {embassy_time::Instant::now().as_secs() / 60}, embassy_time::Instant::now().as_secs());
+defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() / 3600}, {embassy_time::Instant::now().as_secs() % 3600}, embassy_time::Instant::now().as_secs() % 60);
 
 // static SIGNAL: Signal<CriticalSectionRawMutex, Button> = Signal::new();
 
