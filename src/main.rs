@@ -8,6 +8,9 @@
 #![deny(clippy::large_stack_frames)]
 
 mod time;
+use embedded_graphics::pixelcolor::Rgb565;
+use esp_hal::gpio::{Output, OutputConfig, OutputPin};
+use esp_hal::time::Rate;
 use time::{Clock, ntp_worker};
 
 use core::f32::consts::PI;
@@ -16,13 +19,17 @@ use defmt::{info, error};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
 use embassy_net::{Runner, StackResources, };
+use embassy_sync::blocking_mutex::{NoopMutex, raw::NoopRawMutex, Mutex};
+use st7735_lcd;
+use st7735_lcd::Orientation;
+use embedded_hal_bus::spi::ExclusiveDevice;
 
 use esp_alloc as _;
 use esp_backtrace as _;
 
 use esp_hal::Blocking;
 use esp_hal::clock::CpuClock;
-use esp_hal::i2c::master::{Config,I2c};
+use esp_hal::spi::{Mode, master::{Config, Spi}};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::{
     rng::Rng,
@@ -39,15 +46,12 @@ use esp_radio::{
     },
 };
 
+use heapless::String;
+use core::fmt::Write;
 use libm::sincosf;
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, Line};
-use ssd1306::mode::DisplayConfig;
-use ssd1306::prelude::DisplayRotation;
-use ssd1306::size::DisplaySize128x32;
-use ssd1306::{I2CDisplayInterface, Ssd1306};
 use embedded_graphics::{
     mono_font::{ascii::*, MonoTextStyleBuilder},
-    pixelcolor::BinaryColor,
     prelude::*,
     text::{Baseline, Text},
 };
@@ -81,10 +85,25 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    // Configure i2c
-    let i2c = I2c::new(peripherals.I2C0, Config::default()).unwrap()
-        .with_sda(peripherals.GPIO6)
-        .with_scl(peripherals.GPIO7);
+    // Configure spi
+    let sclk = peripherals.GPIO6;
+    let mosi = peripherals.GPIO7;
+    let cs = Output::new(peripherals.GPIO18, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let rst = Output::new(peripherals.GPIO20, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let dc = Output::new(peripherals.GPIO19, esp_hal::gpio::Level::Low, OutputConfig::default());
+
+    let spi_bus = Spi::new(
+        peripherals.SPI2, Config::default()
+                            .with_frequency(Rate::from_khz(100))
+                            .with_mode(Mode::_0))
+        .unwrap()
+        .with_sck(sclk)
+        .with_mosi(mosi);
+
+    let spi_disp = ExclusiveDevice::new(spi_bus, cs, embassy_time::Delay).unwrap();
+
+    let disp: st7735_lcd::ST7735<ExclusiveDevice<Spi<'_, Blocking>, Output<'_>, embassy_time::Delay>, Output<'_>, Output<'_>> = 
+        st7735_lcd::ST7735::new(spi_disp, dc, rst, true, false, 160, 80);
 
     // Configure Wifi
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
@@ -115,7 +134,7 @@ async fn main(spawner: Spawner) -> ! {
     let clock = CLOCK.init(Clock::new());
 
     // Spawn tasks
-    spawner.must_spawn(display_task(i2c, clock));
+    spawner.must_spawn(display_task(disp, clock));
     spawner.must_spawn(connection(controller));
     spawner.must_spawn(net_task(runner));
 
@@ -131,28 +150,34 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn display_task(i2c: I2c<'static, Blocking>, clock: &'static Clock) {
-    let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate180)
-        .into_buffered_graphics_mode();
-    display.init().expect("Error initializing display");
+async fn display_task(
+    mut disp: st7735_lcd::ST7735<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, embassy_time::Delay>, Output<'static>, Output<'static>>, 
+    clock: &'static Clock,
+) 
+{
+    let mut delay = embassy_time::Delay; 
+    disp.init(&mut delay).expect("Error initializing display");
+    disp.set_orientation(&Orientation::Landscape)
+        .unwrap();
+    disp.set_offset(0, 25);
+    disp.clear(Rgb565::BLACK).unwrap();
 
-    let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let thin_stroke_off = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+    let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
+    let thin_stroke_off = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
 
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_7X13)
-        .text_color(BinaryColor::On)
+        .text_color(Rgb565::WHITE)
         .build();
 
     let clearing_text_style = MonoTextStyleBuilder::new()
         .font(&FONT_7X13)
-        .text_color(BinaryColor::Off)
+        .text_color(Rgb565::BLACK)
         .build();
 
-    static CENTER: Point = Point::new(13, 10);
-    static CLOCK_POS:Point = Point::new(60, 10);
-    const FRAME_PERIOD_MS: u64 = 30;
+    static CENTER: Point = Point::new(1, 5);
+    static CLOCK_POS:Point = Point::new(30, 50);
+    const FRAME_PERIOD_MS: u64 = 1000;
     const SCANNER_PERIOD_MS: u64 = 3000;
     let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
     let mut angle: f32 = angle_update;
@@ -165,36 +190,26 @@ async fn display_task(i2c: I2c<'static, Blocking>, clock: &'static Clock) {
         // Draw the circles
         Circle::new(CENTER - convert_tl_to_center(20), 20)
             .into_styled(thin_stroke)
-            .draw(&mut display).expect("Unable to draw circle1");
+            .draw(&mut disp).expect("Unable to draw circle1");
         Circle::new(CENTER - convert_tl_to_center(32), 32)
             .into_styled(thin_stroke)
-            .draw(&mut display).expect("Unable to draw circle2");
+            .draw(&mut disp).expect("Unable to draw circle2");
         Circle::new(CENTER - convert_tl_to_center(44), 44)
             .into_styled(thin_stroke)
-            .draw(&mut display).expect("Unable to draw circle3");
+            .draw(&mut disp).expect("Unable to draw circle3");
         Circle::new(CENTER - convert_tl_to_center(56), 56)
             .into_styled(thin_stroke)
-            .draw(&mut display).expect("Unable to draw circle4");
+            .draw(&mut disp).expect("Unable to draw circle4");
         // Draw the radio line
         let (end_x, end_y) = sincosf(angle);
         let line = Line::new(CENTER, CENTER+Point::new(((28 as f32) * end_x) as i32, ((28 as f32) * end_y) as i32));
         line.into_styled(thin_stroke)
-            .draw(&mut display).expect("Unable to draw line");
+            .draw(&mut disp).expect("Unable to draw line");
 
         let time = clock.get_date_time_str().await;
 
         Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
-
-        display.flush().unwrap_or_else(|e| error!("{:?}", e));
-
-        // Clear the radio line in preperation of drawing the next frame
-        line.into_styled(thin_stroke_off)
-            .draw(&mut display).expect("Unable to UNdraw line");
-
-        Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
-            .draw(&mut display)
+            .draw(&mut disp)
             .unwrap();
 
         // Update the angle for the next frame
@@ -205,6 +220,14 @@ async fn display_task(i2c: I2c<'static, Blocking>, clock: &'static Clock) {
 
         // Pend until the next frame is ready to be drawn
         period_timer.await;
+
+        // Clear the radio line in preperation of drawing the next frame
+        line.into_styled(thin_stroke_off)
+            .draw(&mut disp).expect("Unable to UNdraw line");
+
+        Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
+            .draw(&mut disp)
+            .unwrap();
     }
 }
 
