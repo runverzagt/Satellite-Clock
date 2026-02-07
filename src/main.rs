@@ -12,6 +12,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::pixelcolor::raw::BigEndian;
 use esp_hal::gpio::{Output, OutputConfig};
 use esp_hal::time::Rate;
+use lcd_async::raw_framebuf::RawFrameBuf;
 use time::{Clock, ntp_worker};
 
 use core::f32::consts::PI;
@@ -20,13 +21,15 @@ use defmt::{info, error};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
 use embassy_net::{Runner, StackResources, };
-use embassy_sync::blocking_mutex::{NoopMutex, raw::NoopRawMutex, Mutex};
+use embassy_sync::{ blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embedded_hal_bus::spi::ExclusiveDevice;
 
 use esp_alloc as _;
 use esp_backtrace as _;
 
-use esp_hal::Blocking;
+use esp_hal::{Blocking, Async};
 use esp_hal::clock::CpuClock;
 use esp_hal::spi::{Mode, master::{Config, Spi}};
 use esp_hal::timer::timg::TimerGroup;
@@ -45,9 +48,13 @@ use esp_radio::{
     },
 };
 
-use mipidsi::interface::SpiInterface;
-use mipidsi::{Builder, models::ST7735s};
-use mipidsi::options::Orientation;
+// use mipidsi::interface::SpiInterface;
+// use mipidsi::{Builder, models::ST7735s};
+// use mipidsi::options::Orientation;
+use lcd_async::{Builder, models::ST7735s};
+use lcd_async::interface::SpiInterface;
+use lcd_async::options::Orientation;
+
 use libm::sincosf;
 use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle};
 use embedded_graphics::{
@@ -65,7 +72,8 @@ const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
 const WIDTH: usize = 80;
 const HEIGHT: usize = 160;
-const FRAME_BUF_SIZE: usize = WIDTH * HEIGHT * 2;
+const PIXEL_SIZE: usize = 2; // RGB565 = 2 bytes per pixel
+const FRAME_BUF_SIZE: usize = WIDTH * HEIGHT * PIXEL_SIZE;
 static FRAME_BUFFER: StaticCell<[u8; FRAME_BUF_SIZE]> = StaticCell::new();
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -96,23 +104,31 @@ async fn main(spawner: Spawner) -> ! {
     let rst = Output::new(peripherals.GPIO20, esp_hal::gpio::Level::Low, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO19, esp_hal::gpio::Level::Low, OutputConfig::default());
 
-    let spi_bus = Spi::new(
+    let spi_bus= Spi::new(
         peripherals.SPI2, Config::default()
-                            .with_frequency(Rate::from_mhz(5))
+                            .with_frequency(Rate::from_mhz(10))
                             .with_mode(Mode::_0))
         .unwrap()
         .with_sck(sclk)
-        .with_mosi(mosi);
-    let spi_disp = ExclusiveDevice::new(spi_bus, cs, embassy_time::Delay).unwrap();
-    let di = SpiInterface::new(spi_disp, dc, FRAME_BUFFER.init([0; FRAME_BUF_SIZE]));
+        .with_mosi(mosi)
+        .into_async();
+
+    // Create shared SPI bus
+    static SPI_BUS: StaticCell<Mutex<NoopRawMutex, Spi<'static, Async>>> = StaticCell::new();
+    let spi_bus = Mutex::new(spi_bus);
+    let spi_bus = SPI_BUS.init(spi_bus);
+
+    let spi_disp = SpiDevice::new(spi_bus, cs);
+    let di = SpiInterface::new(spi_disp, dc);
     let mut delay = embassy_time::Delay; 
 
     let display= Builder::new(ST7735s, di)
         .reset_pin(rst)
         .display_size(WIDTH as u16, HEIGHT as u16)
         .display_offset(25, 0)
-        .orientation(Orientation::new().rotate(mipidsi::options::Rotation::Deg90))
+        .orientation(Orientation::new().rotate(lcd_async::options::Rotation::Deg90))
         .init(&mut delay)
+        .await
         .unwrap();
 
     // Configure Wifi
@@ -161,22 +177,24 @@ async fn main(spawner: Spawner) -> ! {
 
 #[embassy_executor::task]
 async fn display_task(
-    mut disp: mipidsi::Display<SpiInterface<'static, ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, embassy_time::Delay>, Output<'static>>, ST7735s, Output<'static>>, 
+    mut disp: lcd_async::Display<SpiInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, Async>, Output<'static>>, Output<'static>>, ST7735s, Output<'static>>, 
     clock: &'static Clock,
 ) 
 {
-    disp.clear(Rgb565::BLACK).unwrap();
+    let frame_buffer = FRAME_BUFFER.init([0; FRAME_BUF_SIZE]);
+    let mut raw_fb = RawFrameBuf::<Rgb565,_>::new(frame_buffer.as_mut_slice(), HEIGHT, WIDTH);
+    raw_fb.clear(Rgb565::BLACK).unwrap();
 
-    let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
+    let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::CYAN, 1);
     let thin_stroke_off = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
 
     let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_7X13)
+        .font(&FONT_9X18)
         .text_color(Rgb565::WHITE)
         .build();
 
     let clearing_text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_7X13)
+        .font(&FONT_9X18)
         .text_color(Rgb565::BLACK)
         .build();
 
@@ -195,26 +213,26 @@ async fn display_task(
         // Draw the circles
         Circle::new(CENTER - convert_tl_to_center(20), 20)
             .into_styled(thin_stroke)
-            .draw(&mut disp).expect("Unable to draw circle1");
+            .draw(&mut raw_fb).expect("Unable to draw circle1");
         Circle::new(CENTER - convert_tl_to_center(32), 32)
             .into_styled(thin_stroke)
-            .draw(&mut disp).expect("Unable to draw circle2");
+            .draw(&mut raw_fb).expect("Unable to draw circle2");
         Circle::new(CENTER - convert_tl_to_center(44), 44)
             .into_styled(thin_stroke)
-            .draw(&mut disp).expect("Unable to draw circle3");
+            .draw(&mut raw_fb).expect("Unable to draw circle3");
         Circle::new(CENTER - convert_tl_to_center(56), 56)
             .into_styled(thin_stroke)
-            .draw(&mut disp).expect("Unable to draw circle4");
+            .draw(&mut raw_fb).expect("Unable to draw circle4");
         // Draw the radio line
         let (end_x, end_y) = sincosf(angle);
         let line = Line::new(CENTER, CENTER+Point::new(((28 as f32) * end_x) as i32, ((28 as f32) * end_y) as i32));
         line.into_styled(thin_stroke)
-            .draw(&mut disp).expect("Unable to draw line");
+            .draw(&mut raw_fb).expect("Unable to draw line");
 
         let time = clock.get_date_time_str().await;
 
         Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
-            .draw(&mut disp)
+            .draw(&mut raw_fb)
             .unwrap();
 
         // Update the angle for the next frame
@@ -223,15 +241,19 @@ async fn display_task(
             angle = 0f32;
         }
 
+        disp.show_raw_data(0, 0,HEIGHT  as u16, WIDTH as u16, raw_fb.as_bytes())
+            .await
+            .unwrap();
+
         // Pend until the next frame is ready to be drawn
         period_timer.await;
 
         // Clear the radio line in preperation of drawing the next frame
         line.into_styled(thin_stroke_off)
-            .draw(&mut disp).expect("Unable to UNdraw line");
+            .draw(&mut raw_fb).expect("Unable to UNdraw line");
 
         Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
-            .draw(&mut disp)
+            .draw(&mut raw_fb)
             .unwrap();
     }
 }
