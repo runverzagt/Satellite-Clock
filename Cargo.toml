@@ -9,30 +9,39 @@ name = "Satellite-Clock"
 path = "./src/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32c6", "unstable"] }
-
-esp-rtos = { version = "0.2.0", features = ["defmt", "embassy", "esp32c6", "esp-radio", "esp-alloc"] }
+esp32c3 = "0.22.0"
+esp-hal = { version = "~1.0", features = ["defmt", "esp32c3", "unstable"] }
+esp-rtos = { version = "0.2.0", features = [
+    "defmt", 
+    "embassy", 
+    "esp32c3", 
+    "esp-radio", 
+    "esp-alloc"
+] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32c3"] }
+esp-println      = { version = "0.16.1", features = ["defmt-espflash", "esp32c3"] }
+esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
+esp-alloc = { version = "0.9.0", features = ["esp32c3"] }
+esp-radio = { version = "0.17.0", features = ["wifi", "unstable", "ble", "coex", "esp32c3", "defmt"] }
 
 defmt                  = "1.0.1"
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32c6"] }
 
 embassy-executor = { version = "0.9.1", features = ["defmt"] }
 embassy-time     = { version = "0.5.0", features = ["defmt"] }
-esp-println      = { version = "0.16.1", features = ["defmt-espflash", "esp32c6"] }
+embassy-futures = { version = "0.1.2", features = ["defmt"] }
+embassy-net = { version = "0.8.0", features = ["defmt", "dhcpv4", "medium-ethernet", "proto-ipv4", "tcp", "udp", "dns"] }
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
+embassy-sync = "0.7.2"
+
+embedded-hal = { version = "1.0.0", features = ["defmt-03"] }
+embedded-hal-bus = { version = "0.3.0", features = ["async", "defmt-03"] }
+embedded-graphics = { version = "0.8.1", features = ["defmt"] }
 
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
-esp32c6 = "0.22.0"
-embassy-sync = "0.7.2"
-embedded-graphics = { version = "0.8.1", features = ["defmt"] }
 numtoa = "0.3.1"
 libm = "0.2.15"
-embassy-futures = { version = "0.1.2", features = ["defmt"] }
-embassy-net = { version = "0.8.0", features = ["defmt", "dhcpv4", "medium-ethernet", "proto-ipv4", "tcp", "udp", "dns"] }
 trouble-host = { version = "0.5.1", features = ["default-packet-pool-mtu-255", "derive", "scan"] }
-esp-backtrace = { version = "0.18.1", features = ["esp32c6", "panic-handler", "println"] }
-esp-alloc = { version = "0.9.0", features = ["esp32c6"] }
-esp-radio = { version = "0.17.0", features = ["wifi", "unstable", "ble", "coex", "esp32c6", "defmt"] }
 sntpc = { version = "0.8.1", default-features = false, features = ["defmt", "sync"] }
 sntpc-net-embassy = { version = "0.8.0", default-features = false,  features = ["defmt"] }
 chrono = { version = "0.4", default-features = false}
@@ -40,11 +49,8 @@ heapless = { version = "0.7.15", features = ["serde"] }
 thiserror-no-std = "2.0.2"
 no-std-net = "0.6.0"
 display-interface = { version = "0.5.0", features = ["defmt-03"] }
-embedded-hal = { version = "1.0.0", features = ["defmt-03"] }
-embedded-hal-bus = { version = "0.3.0", features = ["async", "defmt-03"] }
 lcd-async = "0.1.1"
 mipidsi = "0.9.0"
-embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
 
 [profile.dev]
 # Rust debug is too slow.

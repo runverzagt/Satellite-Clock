@@ -26,7 +26,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "esp32c6",
+ "esp32c3 0.22.0",
  "heapless 0.7.17",
  "lcd-async",
  "libm",
@@ -813,7 +813,7 @@ dependencies = [
  "esp-sync",
  "esp32",
  "esp32c2",
- "esp32c3",
+ "esp32c3 0.31.0",
  "esp32c6",
  "esp32h2",
  "esp32s2",
@@ -839,7 +839,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e025a7a7a0affdb4ff913b5c4494aef96ee03d085bf83c27453ae3a71d50da6"
 dependencies = [
  "document-features",
- "object",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -1016,6 +1015,15 @@ checksum = "e62cf8932966b8d445b6f1832977b468178f0a84effb2e9fda89f60c24d45aa3"
 dependencies = [
  "critical-section",
  "defmt 1.0.1",
+ "vcell",
+]
+
+[[package]]
+name = "esp32c3"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c22d8c27e7d675ef79db212b9e41df80aef6db1a5c819e4e726735f64ee0700"
+dependencies = [
  "vcell",
 ]
 
@@ -1463,15 +1471,6 @@ name = "numtoa"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a6da8d50bd4f4b2e9788c44714a3fa4e465d33fd6a6ad70991db6eb30807dca"
-
-[[package]]
-name = "object"
-version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "once_cell"

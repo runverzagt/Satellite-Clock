@@ -98,11 +98,11 @@ async fn main(spawner: Spawner) -> ! {
     info!("Embassy initialized!");
 
     // Configure spi
-    let sclk = peripherals.GPIO6;
-    let mosi = peripherals.GPIO7;
-    let cs = Output::new(peripherals.GPIO18, esp_hal::gpio::Level::Low, OutputConfig::default());
-    let rst = Output::new(peripherals.GPIO20, esp_hal::gpio::Level::Low, OutputConfig::default());
-    let dc = Output::new(peripherals.GPIO19, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let sclk = peripherals.GPIO4;
+    let mosi = peripherals.GPIO6;
+    let cs = Output::new(peripherals.GPIO7, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let rst = Output::new(peripherals.GPIO3, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let dc = Output::new(peripherals.GPIO2, esp_hal::gpio::Level::Low, OutputConfig::default());
 
     let spi_bus= Spi::new(
         peripherals.SPI2, Config::default()
@@ -185,12 +185,12 @@ async fn display_task(
     let mut raw_fb = RawFrameBuf::<Rgb565,_>::new(frame_buffer.as_mut_slice(), HEIGHT, WIDTH);
     raw_fb.clear(Rgb565::BLACK).unwrap();
 
-    let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::CYAN, 1);
+    let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::YELLOW, 1);
     let thin_stroke_off = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
 
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_9X18)
-        .text_color(Rgb565::WHITE)
+        .text_color(Rgb565::CYAN)
         .build();
 
     let clearing_text_style = MonoTextStyleBuilder::new()
