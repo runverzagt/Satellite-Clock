@@ -41,8 +41,10 @@ thiserror-no-std = "2.0.2"
 no-std-net = "0.6.0"
 display-interface = { version = "0.5.0", features = ["defmt-03"] }
 embedded-hal = { version = "1.0.0", features = ["defmt-03"] }
-st7735-lcd = "0.10.0"
-embedded-hal-bus = { version = "0.3.0", features = ["defmt-03"] }
+embedded-hal-bus = { version = "0.3.0", features = ["async", "defmt-03"] }
+lcd-async = "0.1.1"
+mipidsi = "0.9.0"
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
 
 [profile.dev]
 # Rust debug is too slow.

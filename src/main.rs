@@ -9,7 +9,8 @@
 
 mod time;
 use embedded_graphics::pixelcolor::Rgb565;
-use esp_hal::gpio::{Output, OutputConfig, OutputPin};
+use embedded_graphics::pixelcolor::raw::BigEndian;
+use esp_hal::gpio::{Output, OutputConfig};
 use esp_hal::time::Rate;
 use time::{Clock, ntp_worker};
 
@@ -20,8 +21,6 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
 use embassy_net::{Runner, StackResources, };
 use embassy_sync::blocking_mutex::{NoopMutex, raw::NoopRawMutex, Mutex};
-use st7735_lcd;
-use st7735_lcd::Orientation;
 use embedded_hal_bus::spi::ExclusiveDevice;
 
 use esp_alloc as _;
@@ -46,10 +45,11 @@ use esp_radio::{
     },
 };
 
-use heapless::String;
-use core::fmt::Write;
+use mipidsi::interface::SpiInterface;
+use mipidsi::{Builder, models::ST7735s};
+use mipidsi::options::Orientation;
 use libm::sincosf;
-use embedded_graphics::primitives::{Circle, PrimitiveStyle, Line};
+use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle};
 use embedded_graphics::{
     mono_font::{ascii::*, MonoTextStyleBuilder},
     prelude::*,
@@ -63,6 +63,10 @@ defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() /
 // WIFI info
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
+const WIDTH: usize = 80;
+const HEIGHT: usize = 160;
+const FRAME_BUF_SIZE: usize = WIDTH * HEIGHT * 2;
+static FRAME_BUFFER: StaticCell<[u8; FRAME_BUF_SIZE]> = StaticCell::new();
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -94,16 +98,22 @@ async fn main(spawner: Spawner) -> ! {
 
     let spi_bus = Spi::new(
         peripherals.SPI2, Config::default()
-                            .with_frequency(Rate::from_khz(100))
+                            .with_frequency(Rate::from_mhz(5))
                             .with_mode(Mode::_0))
         .unwrap()
         .with_sck(sclk)
         .with_mosi(mosi);
-
     let spi_disp = ExclusiveDevice::new(spi_bus, cs, embassy_time::Delay).unwrap();
+    let di = SpiInterface::new(spi_disp, dc, FRAME_BUFFER.init([0; FRAME_BUF_SIZE]));
+    let mut delay = embassy_time::Delay; 
 
-    let disp: st7735_lcd::ST7735<ExclusiveDevice<Spi<'_, Blocking>, Output<'_>, embassy_time::Delay>, Output<'_>, Output<'_>> = 
-        st7735_lcd::ST7735::new(spi_disp, dc, rst, true, false, 160, 80);
+    let display= Builder::new(ST7735s, di)
+        .reset_pin(rst)
+        .display_size(WIDTH as u16, HEIGHT as u16)
+        .display_offset(25, 0)
+        .orientation(Orientation::new().rotate(mipidsi::options::Rotation::Deg90))
+        .init(&mut delay)
+        .unwrap();
 
     // Configure Wifi
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
@@ -134,7 +144,7 @@ async fn main(spawner: Spawner) -> ! {
     let clock = CLOCK.init(Clock::new());
 
     // Spawn tasks
-    spawner.must_spawn(display_task(disp, clock));
+    spawner.must_spawn(display_task(display, clock));
     spawner.must_spawn(connection(controller));
     spawner.must_spawn(net_task(runner));
 
@@ -151,15 +161,10 @@ async fn main(spawner: Spawner) -> ! {
 
 #[embassy_executor::task]
 async fn display_task(
-    mut disp: st7735_lcd::ST7735<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, embassy_time::Delay>, Output<'static>, Output<'static>>, 
+    mut disp: mipidsi::Display<SpiInterface<'static, ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, embassy_time::Delay>, Output<'static>>, ST7735s, Output<'static>>, 
     clock: &'static Clock,
 ) 
 {
-    let mut delay = embassy_time::Delay; 
-    disp.init(&mut delay).expect("Error initializing display");
-    disp.set_orientation(&Orientation::Landscape)
-        .unwrap();
-    disp.set_offset(0, 25);
     disp.clear(Rgb565::BLACK).unwrap();
 
     let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
@@ -177,7 +182,7 @@ async fn display_task(
 
     static CENTER: Point = Point::new(1, 5);
     static CLOCK_POS:Point = Point::new(30, 50);
-    const FRAME_PERIOD_MS: u64 = 1000;
+    const FRAME_PERIOD_MS: u64 = 30;
     const SCANNER_PERIOD_MS: u64 = 3000;
     let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
     let mut angle: f32 = angle_update;
