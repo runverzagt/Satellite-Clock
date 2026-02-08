@@ -15,12 +15,13 @@ use esp_hal::time::Rate;
 use lcd_async::raw_framebuf::RawFrameBuf;
 use time::{Clock, ntp_worker};
 
+use core::error::Error;
 use core::f32::consts::PI;
 
 use defmt::{info, error};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
-use embassy_net::{Runner, StackResources, };
+use embassy_net::{DhcpConfig, Runner, StackResources };
 use embassy_sync::{ blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -125,7 +126,7 @@ async fn main(spawner: Spawner) -> ! {
     let display= Builder::new(ST7735s, di)
         .reset_pin(rst)
         .display_size(WIDTH as u16, HEIGHT as u16)
-        .display_offset(25, 0)
+        .display_offset(28, 0)
         .orientation(Orientation::new().rotate(lcd_async::options::Rotation::Deg90))
         .init(&mut delay)
         .await
@@ -143,10 +144,11 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to create new wifi controller/interface");
     let wifi_iface = interfaces.sta;
     
-    let dhcpv4_config = embassy_net::Config::dhcpv4(Default::default());
+    let dhcpv4_config = embassy_net::Config::dhcpv4(DhcpConfig::default());
 
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+    let tls_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
 
     // Init network stack
     let (stack, runner) = embassy_net::new(
@@ -166,7 +168,7 @@ async fn main(spawner: Spawner) -> ! {
 
     wait_for_connection(stack).await;
 
-    spawner.must_spawn(ntp_worker(stack, clock));
+    spawner.must_spawn(ntp_worker(stack, clock, tls_seed));
 
     loop {
         Timer::after_secs(300).await;

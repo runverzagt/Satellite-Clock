@@ -1,16 +1,24 @@
 use defmt::{info, error};
-use embassy_net::{dns};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer, Instant, with_timeout};
-use embassy_net::{ udp::{PacketMetadata, UdpSocket}};
+use embassy_net::{ 
+    dns,
+    udp::{PacketMetadata, UdpSocket}, 
+    dns::DnsSocket,
+    tcp::client::{TcpClient, TcpClientState},
+};
 use esp_radio::wifi::{WifiStaState};
+use reqwless::client::{HttpClient, TlsConfig};
 use sntpc::{get_time, NtpContext, NtpTimestampGenerator};
 use sntpc_net_embassy::UdpSocketWrapper;
 use chrono::{ DateTime, Datelike, Timelike, Utc, Weekday};
+use chrono::{FixedOffset, TimeZone};
 use core::{fmt::Debug, net::{SocketAddr}};
 use heapless::String;
 use core::fmt::Write;
+use core::option::Option;
 use thiserror_no_std::Error;
+use serde_json::{Value};
 
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -72,12 +80,14 @@ impl From<SntpcError> for sntpc::Error {
 
 pub(crate) struct Clock {
     sys_start: Mutex<CriticalSectionRawMutex, DateTime<Utc>>,
+    is_set: bool,
 }
 
 impl Clock {
     pub(crate) fn new() -> Self {
         Self {
             sys_start: Mutex::new(DateTime::UNIX_EPOCH),
+            is_set: false
         }
     }
 
@@ -87,8 +97,6 @@ impl Clock {
         *sys_start = now
             .checked_sub_signed(chrono::Duration::milliseconds(elapsed as i64))
             .expect("sys_start greater than current_ts")
-            .checked_sub_signed(chrono::Duration::hours(8))
-            .expect("trouble setting timezone")
     }
 
     pub(crate) async fn now(&self) -> DateTime<Utc>
@@ -118,24 +126,50 @@ impl Clock {
         write!(result, "{day_title} {hours:02}{time_delimiter}{minutes:02}").unwrap();
         result
     }
+
+    pub(crate) async fn set_timezone(&self, offset: i32) {
+        info!("Updating TZ");
+        let mut sys_start = self.sys_start.lock().await;
+        *sys_start = sys_start.checked_add_signed(chrono::Duration::hours(offset as i64))
+            .expect("trouble setting timezone");
+    }
 }
 
 #[embassy_executor::task]
 pub async fn ntp_worker(
     stack: embassy_net::Stack<'static>,
     clock: &'static Clock,
+    tls_seed: u64,
 ) {
     loop {
         let sleep_sec : u64 = match esp_radio::wifi::sta_state() {
             WifiStaState::Connected => {
                 info!("NTP Request");
-                match ntp_request(stack,  clock).await {
+                let ss = match ntp_request(stack,  clock).await {
                     Err(e) => {
                         error!("NTP error Response: {:?}", e);
                         10
                     }
                     Ok(_) => 3600,
+                };
+                info!("Get Location");
+                match get_timezone(stack, tls_seed).await {
+                    Ok(offset) => {
+                        match offset {
+                            Some(o) => {
+                                clock.set_timezone(o).await;
+                                info!("New time: {}", clock.get_date_time_str().await.as_str());
+                            }
+                            None => {
+                                error!("Unable to parse timezone")
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Timezone Error: {:?}", e);
+                    }
                 }
+                ss
             }
             // If the wifi isn't connected, sleep for 1 minute to see if it comes up
             _ => 600,
@@ -182,4 +216,77 @@ async fn ntp_request  (
     info!("Current time: {}", clock.get_date_time_str().await.as_str());
 
     Ok(())
+}
+
+#[derive(Error, Debug, defmt::Format)]
+enum TimezoneError {
+    NoInternet,
+    CouldNotConnect,
+    JsonParseError
+}
+
+async fn get_timezone(
+    stack: embassy_net::Stack<'_>,
+    tls_seed: u64,
+) -> Result<Option<i32>, TimezoneError>  {
+    let mut rx_buffer = [0; 16640];
+    let mut tx_buffer = [0; 4096];
+    const BUFF_SZ: usize = 4096;
+    const URL: &str = "https://myip.foo/api";
+
+    match esp_radio::wifi::sta_state() {
+        WifiStaState::Connected => {}
+        _ => {return Err(TimezoneError::NoInternet)}
+    };
+
+    let dns = DnsSocket::new(stack);
+    let tcp_state = TcpClientState::<1, 4096, 4096>::new();
+    let tcp = TcpClient::new(stack, &tcp_state);
+
+    let tls = TlsConfig::new(
+        tls_seed,
+        &mut rx_buffer,
+        &mut tx_buffer,
+        reqwless::client::TlsVerify::None,
+    );
+
+    let mut client = HttpClient::new_with_tls(&tcp, &dns, tls);
+    let mut buffer = [0u8; 4096];
+    let mut http_req = client
+        .request(
+            reqwless::request::Method::GET,
+            URL,
+        )
+        .await
+        .unwrap();
+    let response = http_req.send(&mut buffer).await.unwrap();
+
+    info!("Got response");
+    let res = response.body().read_to_end().await.unwrap();
+
+    let content = core::str::from_utf8(res).unwrap();
+    info!("{}", content);
+
+    let tz_string: Value = match serde_json::from_str(content) {
+        Ok(s) => {s}
+        Err(e) => {return Err(TimezoneError::JsonParseError)}
+    };
+    info!("{:?}", tz_string["location"]["timezone"].as_str().unwrap());
+
+    let offset = convert_tz_str_to_offset(tz_string["location"]["timezone"].as_str().unwrap());
+
+    info!("offset: {}", offset);
+
+    return Ok(offset)
+}
+
+fn convert_tz_str_to_offset(tz: &str) -> Option<i32> {
+    // We have to use this weird syntax because match doesn't use PartialEq
+    match tz {
+        _ if tz == "America/Los_Angeles" => Some(-8),
+        _ if tz == "America/Denver" => Some(-7),
+        _ if tz == "America/Chicago" => Some(-6),
+        _ if tz == "America/New_York" => Some(-4),
+        _ => None,
+    }
 }
