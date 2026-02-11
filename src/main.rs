@@ -8,6 +8,7 @@
 #![deny(clippy::large_stack_frames)]
 
 mod time;
+use chrono::{ DateTime, Datelike, Timelike, Utc, Weekday};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::pixelcolor::raw::BigEndian;
 use esp_hal::gpio::{Output, OutputConfig};
@@ -51,9 +52,6 @@ use esp_radio::{
 };
 use esp_hal::system::software_reset;
 
-// use mipidsi::interface::SpiInterface;
-// use mipidsi::{Builder, models::ST7735s};
-// use mipidsi::options::Orientation;
 use lcd_async::{Builder, models::ST7735s};
 use lcd_async::interface::SpiInterface;
 use lcd_async::options::Orientation;
@@ -210,6 +208,9 @@ async fn display_task(
     const SCANNER_PERIOD_MS: u64 = 3000;
     let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
     let mut angle: f32 = angle_update;
+    let mut old_time = DateTime::UNIX_EPOCH;
+    let mut time: heapless::String<15>= String::<15>::new();
+    write!(time, "Awaiting Time").unwrap();
     info!("display_task started");
 
     loop {
@@ -235,18 +236,31 @@ async fn display_task(
         line.into_styled(thin_stroke)
             .draw(&mut raw_fb).expect("Unable to draw line");
 
-        let mut time: heapless::String<15>;
+        // Use new_time to see if the time has changed enough to redraw the time
+        let new_time = clock.now().await;
+        let time_redraw = (new_time.minute() != old_time.minute()) || (new_time.hour() != old_time.hour());
+        if !clock.time_has_been_set().await {
+            Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
+                .draw(&mut raw_fb)
+                .unwrap();
+        }else if time_redraw {
+            Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
+                .draw(&mut raw_fb)
+                .unwrap();
 
-        if clock.time_has_been_set().await {
-            time = clock.get_date_time_str().await;
-        } else {
-            time = String::<15>::new();
-            write!(time, "Awaiting Time").unwrap();
+            if clock.time_has_been_set().await {
+                time = clock.get_date_time_str().await;
+            } else {
+            }
+
+            Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
+                .draw(&mut raw_fb)
+                .unwrap();
+
+            // Update
+            old_time = new_time;
         }
 
-        Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
-            .draw(&mut raw_fb)
-            .unwrap();
 
         // Update the angle for the next frame
         angle -= angle_update;
@@ -265,9 +279,6 @@ async fn display_task(
         line.into_styled(thin_stroke_off)
             .draw(&mut raw_fb).expect("Unable to UNdraw line");
 
-        Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
-            .draw(&mut raw_fb)
-            .unwrap();
     }
 }
 
