@@ -19,6 +19,7 @@ use core::fmt::Write;
 use core::option::Option;
 use thiserror_no_std::Error;
 use serde_json::{Value};
+use embedded_io;
 
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -80,15 +81,20 @@ impl From<SntpcError> for sntpc::Error {
 
 pub(crate) struct Clock {
     sys_start: Mutex<CriticalSectionRawMutex, DateTime<Utc>>,
-    is_set: bool,
+    is_set: Mutex<CriticalSectionRawMutex, bool>,
 }
 
 impl Clock {
     pub(crate) fn new() -> Self {
         Self {
             sys_start: Mutex::new(DateTime::UNIX_EPOCH),
-            is_set: false
+            is_set: Mutex::new(false)
         }
+    }
+
+    pub(crate) async fn time_has_been_set(&self) -> bool {
+        let is_set = self.is_set.lock().await;
+        *is_set
     }
 
     pub(crate) async fn set_time(&self, now: DateTime<Utc>) {
@@ -96,7 +102,9 @@ impl Clock {
         let elapsed = Instant::now().as_millis();
         *sys_start = now
             .checked_sub_signed(chrono::Duration::milliseconds(elapsed as i64))
-            .expect("sys_start greater than current_ts")
+            .expect("sys_start greater than current_ts");
+        let mut is_set = self.is_set.lock().await;
+        *is_set = true;
     }
 
     pub(crate) async fn now(&self) -> DateTime<Utc>
@@ -106,7 +114,7 @@ impl Clock {
         *sys_start + chrono::Duration::milliseconds(elapsed as i64)
     }
 
-    pub(crate) async fn get_date_time_str(&self) -> String<10> {
+    pub(crate) async fn get_date_time_str(&self) -> String<15> {
         let dt = self.now().await;
         let day_title = match dt.weekday() {
             Weekday::Mon => "Mon",
@@ -121,7 +129,7 @@ impl Clock {
         let minutes = dt.minute();
         let seconds = dt.second();
 
-        let mut result = String::<10>::new();
+        let mut result = String::<15>::new();
         let time_delimiter = if seconds % 2 == 0 { ":" } else { " " };
         write!(result, "{day_title} {hours:02}{time_delimiter}{minutes:02}").unwrap();
         result
@@ -222,7 +230,29 @@ async fn ntp_request  (
 enum TimezoneError {
     NoInternet,
     CouldNotConnect,
-    JsonParseError
+    Network,
+    JsonParse,
+    Dns
+}
+
+impl From<TimezoneError> for reqwless::Error {
+    fn from(err: TimezoneError) -> Self {
+        match err {
+            TimezoneError::Dns => Self::Dns,
+            // TimezoneError::Network => Self::Network(embedded_io::ErrorKind),
+            _ => todo!(),
+        }
+    }
+}
+
+impl From<reqwless::Error> for TimezoneError {
+    fn from(err: reqwless::Error) -> Self {
+        match err {
+            reqwless::Error::Dns => TimezoneError::Dns,
+            // reqwless::Error::Network(embedded_io::ErrorKind) => TimezoneError::Network,
+            _ => todo!(),
+        }
+    }
 }
 
 async fn get_timezone(
@@ -234,10 +264,11 @@ async fn get_timezone(
     const BUFF_SZ: usize = 4096;
     const URL: &str = "https://myip.foo/api";
 
-    match esp_radio::wifi::sta_state() {
-        WifiStaState::Connected => {}
-        _ => {return Err(TimezoneError::NoInternet)}
-    };
+    if stack.is_config_up() {
+
+    } else {
+        return Err(TimezoneError::NoInternet);
+    }
 
     let dns = DnsSocket::new(stack);
     let tcp_state = TcpClientState::<1, 4096, 4096>::new();
@@ -257,8 +288,7 @@ async fn get_timezone(
             reqwless::request::Method::GET,
             URL,
         )
-        .await
-        .unwrap();
+        .await?;
     let response = http_req.send(&mut buffer).await.unwrap();
 
     info!("Got response");
@@ -269,13 +299,13 @@ async fn get_timezone(
 
     let tz_string: Value = match serde_json::from_str(content) {
         Ok(s) => {s}
-        Err(e) => {return Err(TimezoneError::JsonParseError)}
+        Err(e) => {return Err(TimezoneError::JsonParse)}
     };
     info!("{:?}", tz_string["location"]["timezone"].as_str().unwrap());
 
     let offset = convert_tz_str_to_offset(tz_string["location"]["timezone"].as_str().unwrap());
 
-    info!("offset: {}", offset);
+    info!("offset: {}", offset.unwrap());
 
     return Ok(offset)
 }

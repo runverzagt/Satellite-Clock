@@ -17,6 +17,7 @@ use time::{Clock, ntp_worker};
 
 use core::error::Error;
 use core::f32::consts::PI;
+use core::fmt::write;
 
 use defmt::{info, error};
 use embassy_executor::Spawner;
@@ -48,6 +49,7 @@ use esp_radio::{
         WifiEvent,
     },
 };
+use esp_hal::system::software_reset;
 
 // use mipidsi::interface::SpiInterface;
 // use mipidsi::{Builder, models::ST7735s};
@@ -64,6 +66,8 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use static_cell::StaticCell;
+use heapless::String;
+use core::fmt::Write;
 
 // Define the timestamp for defmt
 defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() / 3600}, {(embassy_time::Instant::now().as_secs() % 3600) / 60}, embassy_time::Instant::now().as_secs() % 60);
@@ -231,7 +235,14 @@ async fn display_task(
         line.into_styled(thin_stroke)
             .draw(&mut raw_fb).expect("Unable to draw line");
 
-        let time = clock.get_date_time_str().await;
+        let mut time: heapless::String<15>;
+
+        if clock.time_has_been_set().await {
+            time = clock.get_date_time_str().await;
+        } else {
+            time = String::<15>::new();
+            write!(time, "Awaiting Time").unwrap();
+        }
 
         Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
             .draw(&mut raw_fb)
@@ -284,10 +295,12 @@ async fn connection(mut controller: WifiController<'static>) {
                     .with_ssid(SSID.into())
                     .with_password(PASSWORD.into()),
             );
-            let res = controller.set_config(&client_config);
-            info!("Wifi config returned: {:?}", res);
-            let res = controller.start_async().await;
-            info!("Wifi startup returned: {:?}", res);
+            if let Err(res) = controller.set_config(&client_config) {
+                error!("Wifi config returned: {:?}", res);
+            }
+            if let Err(res) = controller.start_async().await {
+                error!("Wifi startup returned: {:?}", res);
+            }
         }
         info!("About to connect....");
 
@@ -307,14 +320,21 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
 }
 
 async fn wait_for_connection(stack: embassy_net::Stack<'_>) {
+    let mut timeout = 600;
+
     info!("Waiting for link to be up");
     loop {
         if stack.is_link_up() {
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
+        timeout -= 1;
+        if timeout == 0 {
+            software_reset();
+        }
     }
 
+    let mut timout = 600;
     info!("Waiting to get IP Addr");
     loop {
         if let Some(config) = stack.config_v4() {
@@ -322,5 +342,9 @@ async fn wait_for_connection(stack: embassy_net::Stack<'_>) {
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
+        timeout -= 1;
+        if timeout == 0 {
+            software_reset();
+        }
     }
 }
