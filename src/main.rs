@@ -101,11 +101,11 @@ async fn main(spawner: Spawner) -> ! {
     info!("Embassy initialized!");
 
     // Configure spi
-    let sclk = peripherals.GPIO4;
-    let mosi = peripherals.GPIO6;
-    let cs = Output::new(peripherals.GPIO7, esp_hal::gpio::Level::Low, OutputConfig::default());
-    let rst = Output::new(peripherals.GPIO3, esp_hal::gpio::Level::Low, OutputConfig::default());
-    let dc = Output::new(peripherals.GPIO2, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let sclk = peripherals.GPIO8;
+    let mosi = peripherals.GPIO9;
+    let cs = Output::new(peripherals.GPIO21, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let rst = Output::new(peripherals.GPIO10, esp_hal::gpio::Level::Low, OutputConfig::default());
+    let dc = Output::new(peripherals.GPIO20, esp_hal::gpio::Level::Low, OutputConfig::default());
 
     let spi_bus= Spi::new(
         peripherals.SPI2, Config::default()
