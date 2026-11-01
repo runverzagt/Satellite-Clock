@@ -55,6 +55,7 @@ reqwless = { version = "0.14.0", features = ["defmt"] }
 serde = { version = "1.0.228", default-features = false, features=["derive"]}
 serde_json = {version = "1.0.149", default-features = false, features=["alloc"]}
 embedded-io = "0.7.1"
+libscd = { version = "0.5.1", features = ["async", "defmt", "scd4x"] }
 
 [profile.dev]
 # Rust debug is too slow.

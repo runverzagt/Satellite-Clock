@@ -10,24 +10,21 @@
 mod time;
 use chrono::{ DateTime, Datelike, Timelike, Utc, Weekday};
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::pixelcolor::raw::BigEndian;
 use esp_hal::gpio::{Output, OutputConfig};
 use esp_hal::time::Rate;
 use lcd_async::raw_framebuf::RawFrameBuf;
+use libscd::measurement::Measurement;
 use time::{Clock, ntp_worker};
 
-use core::error::Error;
 use core::f32::consts::PI;
-use core::fmt::write;
 
 use defmt::{info, error};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
 use embassy_net::{DhcpConfig, Runner, StackResources };
-use embassy_sync::{ blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_sync::{ blocking_mutex::raw::{NoopRawMutex, CriticalSectionRawMutex}, mutex::Mutex, watch::{Watch, Receiver, Sender}};
 
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embedded_hal_bus::spi::ExclusiveDevice;
 
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -40,6 +37,7 @@ use esp_hal::{
     rng::Rng,
     ram
 };
+use esp_hal::{i2c::master::I2c};
 use esp_println as _;
 use esp_radio::wifi::{ClientConfig, PowerSaveMode, WifiStaState};
 use esp_radio::{
@@ -52,20 +50,24 @@ use esp_radio::{
 };
 use esp_hal::system::software_reset;
 
+use libscd::asynchronous::scd4x::Scd4x;
+
 use lcd_async::{Builder, models::ST7735s};
 use lcd_async::interface::SpiInterface;
 use lcd_async::options::Orientation;
 
 use libm::sincosf;
-use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle};
+use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle, Rectangle};
 use embedded_graphics::{
     mono_font::{ascii::*, MonoTextStyleBuilder},
     prelude::*,
     text::{Baseline, Text},
 };
+
 use static_cell::StaticCell;
 use heapless::String;
 use core::fmt::Write;
+
 
 // Define the timestamp for defmt
 defmt::timestamp!("{:02}:{:02}:{:02}", {embassy_time::Instant::now().as_secs() / 3600}, {(embassy_time::Instant::now().as_secs() % 3600) / 60}, embassy_time::Instant::now().as_secs() % 60);
@@ -128,11 +130,36 @@ async fn main(spawner: Spawner) -> ! {
     let display= Builder::new(ST7735s, di)
         .reset_pin(rst)
         .display_size(WIDTH as u16, HEIGHT as u16)
-        .display_offset(28, 0)
         .orientation(Orientation::new().rotate(lcd_async::options::Rotation::Deg90))
+        .display_offset(28, 0)
         .init(&mut delay)
         .await
         .unwrap();
+
+    // Configure i2c
+    Timer::after(Duration::from_millis(1000)).await;    // Allow 1000 ms to power up
+    let delay = embassy_time::Delay; 
+    let i2c_config = esp_hal::i2c::master::Config::default().with_frequency(Rate::from_khz(10));
+    let i2c = I2c::new(peripherals.I2C0, i2c_config).unwrap()
+        .with_sda(peripherals.GPIO0)
+        .with_scl(peripherals.GPIO1)
+        .into_async();
+
+    // Start sensor
+    let mut scd = Scd4x::new(i2c, delay);
+    // When re-programming, the controller will be restarted,
+    // but not the sensor. We try to stop it in order to
+    // prevent the rest of the commands failing.
+    if let Err(e) = scd.stop_periodic_measurement().await {
+        defmt::panic!("Failed to stop periodic measurement: {:?}", e);
+    }
+
+    // info!("Sensor serial number: {:?}", scd.serial_number().await);
+    if let Err(e) = scd.start_low_power_periodic_measurement().await {
+        defmt::panic!("Failed to start periodic measurement: {:?}", e);
+    }
+    // Create a signal to send the sensor's reading
+    static SENSOR_VALUE: Watch<CriticalSectionRawMutex, Measurement, 1> = Watch::new();
 
     // Configure Wifi
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
@@ -164,9 +191,10 @@ async fn main(spawner: Spawner) -> ! {
     let clock = CLOCK.init(Clock::new());
 
     // Spawn tasks
-    spawner.must_spawn(display_task(display, clock));
-    spawner.must_spawn(connection(controller));
-    spawner.must_spawn(net_task(runner));
+    spawner.must_spawn(display_task(display, clock, SENSOR_VALUE.receiver().expect("Unable to create reiever")));
+    //spawner.must_spawn(connection(controller));
+    //spawner.must_spawn(net_task(runner));
+    spawner.must_spawn(sensor_read_task(scd, SENSOR_VALUE.sender()));
 
     wait_for_connection(stack).await;
 
@@ -183,10 +211,11 @@ async fn main(spawner: Spawner) -> ! {
 async fn display_task(
     mut disp: lcd_async::Display<SpiInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, Async>, Output<'static>>, Output<'static>>, ST7735s, Output<'static>>, 
     clock: &'static Clock,
+    mut sensor_reading: Receiver<'static, CriticalSectionRawMutex, Measurement, 1>
 ) 
 {
     let frame_buffer = FRAME_BUFFER.init([0; FRAME_BUF_SIZE]);
-    let mut raw_fb = RawFrameBuf::<Rgb565,_>::new(frame_buffer.as_mut_slice(), HEIGHT, WIDTH);
+    let mut raw_fb = RawFrameBuf::<Rgb565,_>::new(frame_buffer.as_mut_slice(),HEIGHT, WIDTH );
     raw_fb.clear(Rgb565::BLACK).unwrap();
 
     let thin_stroke = PrimitiveStyle::with_stroke(Rgb565::YELLOW, 1);
@@ -203,14 +232,24 @@ async fn display_task(
         .build();
 
     static CENTER: Point = Point::new(1, 5);
-    static CLOCK_POS:Point = Point::new(30, 50);
+    static CLOCK_POS:Point = Point::new(25, 55);
+    static C02_POS:Point = Point::new(40, 2);
+    static TEMP_POS:Point = Point::new(50, 20);
+    static HUM_POS:Point = Point::new(50, 38);
     const FRAME_PERIOD_MS: u64 = 30;
     const SCANNER_PERIOD_MS: u64 = 3000;
     let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
     let mut angle: f32 = angle_update;
     let mut old_time = DateTime::UNIX_EPOCH;
-    let mut time: heapless::String<15>= String::<15>::new();
+    let mut time = heapless::String::<15>::new();
+    // Measurement variables
+    let mut measurement: Measurement;
+    let mut co2_str= heapless::String::<13>::new();
     write!(time, "Awaiting Time").unwrap();
+    write!(co2_str, "CO2 Starting").unwrap();
+    Text::with_baseline(co2_str.as_str(), C02_POS, text_style, Baseline::Top)
+            .draw(&mut raw_fb)
+            .unwrap();
     info!("display_task started");
 
     loop {
@@ -261,6 +300,43 @@ async fn display_task(
             old_time = new_time;
         }
 
+        // Update the sensor reading values
+        if sensor_reading.try_changed().is_some() 
+        {
+            Rectangle::new(C02_POS, Size { width: 100, height: 56 })
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+                .draw(&mut raw_fb).expect("Unable to draw rect");
+
+            measurement = sensor_reading.get().await;
+
+            let mut temp_string = String::<4>::new();
+            write!(temp_string, "{:4}", measurement.co2).unwrap();
+            co2_str = String::from("CO2: ");
+            co2_str.push_str(&temp_string).unwrap();
+            co2_str.push_str(" PPM").unwrap();
+            Text::with_baseline(co2_str.as_str(), C02_POS, text_style, Baseline::Top)
+                    .draw(&mut raw_fb)
+                    .unwrap();
+
+            let mut temp_string = String::<4>::new();
+            write!(temp_string, "{:.*}", 1, measurement.temperature).unwrap();
+            co2_str = String::from("T: ");
+            co2_str.push_str(&temp_string).unwrap();
+            co2_str.push_str("C").unwrap();
+            Text::with_baseline(co2_str.as_str(), TEMP_POS, text_style, Baseline::Top)
+                    .draw(&mut raw_fb)
+                    .unwrap();
+
+            let mut temp_string = String::<4>::new();
+            write!(temp_string, "{:.*}", 1, measurement.humidity).unwrap();
+            co2_str = String::from("HUM: ");
+            co2_str.push_str(&temp_string).unwrap();
+            co2_str.push_str("%").unwrap();
+            Text::with_baseline(co2_str.as_str(), HUM_POS, text_style, Baseline::Top)
+                    .draw(&mut raw_fb)
+                    .unwrap();
+        }
+
 
         // Update the angle for the next frame
         angle -= angle_update;
@@ -268,7 +344,7 @@ async fn display_task(
             angle = 0f32;
         }
 
-        disp.show_raw_data(0, 0,HEIGHT  as u16, WIDTH as u16, raw_fb.as_bytes())
+        disp.show_raw_data(0 as u16, 0 as u16,raw_fb.width() as u16, raw_fb.height() as u16, raw_fb.as_bytes())
             .await
             .unwrap();
 
@@ -345,7 +421,7 @@ async fn wait_for_connection(stack: embassy_net::Stack<'_>) {
         }
     }
 
-    let mut timout = 600;
+    let mut timeout = 600;
     info!("Waiting to get IP Addr");
     loop {
         if let Some(config) = stack.config_v4() {
@@ -356,6 +432,29 @@ async fn wait_for_connection(stack: embassy_net::Stack<'_>) {
         timeout -= 1;
         if timeout == 0 {
             software_reset();
+        }
+    }
+}
+
+// This task reads the C02 sensor and sends the value to the supplied watch::Sender
+#[embassy_executor::task]
+async fn sensor_read_task(mut sensor: Scd4x<I2c<'static, Async>, embassy_time::Delay>,
+    sensor_measurement: Sender<'static, CriticalSectionRawMutex, Measurement, 1>
+) {
+    loop {
+        if sensor.data_ready().await.unwrap() {
+            let m: Measurement = match sensor.read_measurement().await {
+                Ok(m) => {
+                    m
+                },
+                Err(e) => panic!("Unable to read value: {:?}", e)
+            };
+
+            info!("CO2: {}\nHumidity: {}\nTemperature: {}", m.co2, m.humidity, m.temperature);
+            
+            sensor_measurement.send(m);
+
+            Timer::after(Duration::from_secs(30)).await;
         }
     }
 }
