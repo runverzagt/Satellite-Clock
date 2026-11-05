@@ -148,11 +148,8 @@ async fn main(spawner: Spawner) -> ! {
     // Create a signal to send the sensor's reading
     static SENSOR_VALUE: Watch<CriticalSectionRawMutex, Measurement, 1> = Watch::new();
 
-    static CLOCK: StaticCell<Clock> = StaticCell::new();
-    let clock = CLOCK.init(Clock::new());
-
     // Spawn tasks
-    spawner.must_spawn(display_task(display, clock, SENSOR_VALUE.receiver().expect("Unable to create reiever")));
+    spawner.must_spawn(display_task(display, SENSOR_VALUE.receiver().expect("Unable to create reiever")));
     spawner.must_spawn(sensor_read_task(scd, SENSOR_VALUE.sender()));
 
     loop {
@@ -165,7 +162,6 @@ async fn main(spawner: Spawner) -> ! {
 #[embassy_executor::task]
 async fn display_task(
     mut disp: lcd_async::Display<SpiInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, Async>, Output<'static>>, Output<'static>>, ST7735s, Output<'static>>, 
-    clock: &'static Clock,
     mut sensor_reading: Receiver<'static, CriticalSectionRawMutex, Measurement, 1>
 ) 
 {
@@ -177,35 +173,55 @@ async fn display_task(
     let thin_stroke_off = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
 
     let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_9X18)
+        .font(&FONT_10X20)
+        .text_color(Rgb565::CYAN)
+        .build();
+    let clearing_text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_10X20)
+        .text_color(Rgb565::BLACK)
+        .build();
+    let small_text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X13_ITALIC)
         .text_color(Rgb565::CYAN)
         .build();
 
-    let clearing_text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_9X18)
-        .text_color(Rgb565::BLACK)
-        .build();
-
     static CENTER: Point = Point::new(1, 5);
-    static CLOCK_POS:Point = Point::new(25, 55);
-    static C02_POS:Point = Point::new(40, 2);
-    static TEMP_POS:Point = Point::new(50, 20);
-    static HUM_POS:Point = Point::new(50, 38);
+    static C02_POS:Point = Point::new(50, 2);
+    static TEMP_POS:Point = Point::new(5, 47);
+    static HUM_POS:Point = Point::new(100, 47);
     const FRAME_PERIOD_MS: u64 = 30;
     const SCANNER_PERIOD_MS: u64 = 3000;
     let angle_update = ((2f32 * PI) / (SCANNER_PERIOD_MS as f32)) * FRAME_PERIOD_MS as f32;
     let mut angle: f32 = angle_update;
-    let mut old_time = DateTime::UNIX_EPOCH;
-    let mut time = heapless::String::<15>::new();
     // Measurement variables
     let mut measurement: Measurement;
-    let mut co2_str= heapless::String::<13>::new();
-    write!(time, "Awaiting Time").unwrap();
-    write!(co2_str, "CO2 Starting").unwrap();
-    Text::with_baseline(co2_str.as_str(), C02_POS, text_style, Baseline::Top)
+    let mut co2_str= heapless::String::<4>::new();
+    let mut temp_str= heapless::String::<7>::new();
+    let mut hum_str= heapless::String::<5>::new();
+
+    // Draw static interface
+    info!("display_task started");
+    Text::with_baseline("CO2 (PPM)", Point::new(40, 22), small_text_style, Baseline::Top)
             .draw(&mut raw_fb)
             .unwrap();
-    info!("display_task started");
+    Line::new(Point::new(40, 21), Point::new(100, 21))
+            .into_styled(thin_stroke)
+            .draw(&mut raw_fb)
+            .unwrap();
+    Text::with_baseline("Temp", Point::new(0, 67), small_text_style, Baseline::Top)
+            .draw(&mut raw_fb)
+            .unwrap();
+    Line::new(Point::new(0, 66), Point::new(60, 66))
+            .into_styled(thin_stroke)
+            .draw(&mut raw_fb)
+            .unwrap();
+    Text::with_baseline("Humidity", Point::new(95, 67), small_text_style, Baseline::Top)
+            .draw(&mut raw_fb)
+            .unwrap();
+    Line::new(Point::new(95, 66), Point::new(155, 66))
+            .into_styled(thin_stroke)
+            .draw(&mut raw_fb)
+            .unwrap();
 
     loop {
         // prepare the timer
@@ -230,64 +246,44 @@ async fn display_task(
         line.into_styled(thin_stroke)
             .draw(&mut raw_fb).expect("Unable to draw line");
 
-        // Use new_time to see if the time has changed enough to redraw the time
-        let new_time = clock.now().await;
-        let time_redraw = (new_time.minute() != old_time.minute()) || (new_time.hour() != old_time.hour());
-        if !clock.time_has_been_set().await {
-            Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
-                .draw(&mut raw_fb)
-                .unwrap();
-        }else if time_redraw {
-            Text::with_baseline(time.as_str(), CLOCK_POS, clearing_text_style, Baseline::Top)
-                .draw(&mut raw_fb)
-                .unwrap();
-
-            if clock.time_has_been_set().await {
-                time = clock.get_date_time_str().await;
-            } else {
-            }
-
-            Text::with_baseline(time.as_str(), CLOCK_POS, text_style, Baseline::Top)
-                .draw(&mut raw_fb)
-                .unwrap();
-
-            // Update
-            old_time = new_time;
-        }
 
         // Update the sensor reading values
         if sensor_reading.try_changed().is_some() 
         {
-            Rectangle::new(C02_POS, Size { width: 120, height: 56 })
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
-                .draw(&mut raw_fb).expect("Unable to draw rect");
-
             measurement = sensor_reading.get().await;
 
             let mut temp_string = String::<4>::new();
             write!(temp_string, "{:4}", measurement.co2).unwrap();
-            co2_str = String::from("CO2: ");
+            Text::with_baseline(co2_str.as_str(), C02_POS, clearing_text_style, Baseline::Top)
+                    .draw(&mut raw_fb)
+                    .unwrap();
+            co2_str = String::from("");
             co2_str.push_str(&temp_string).unwrap();
-            co2_str.push_str(" PPM").unwrap();
             Text::with_baseline(co2_str.as_str(), C02_POS, text_style, Baseline::Top)
                     .draw(&mut raw_fb)
                     .unwrap();
 
             let mut temp_string = String::<4>::new();
             write!(temp_string, "{:.*}", 1, measurement.temperature).unwrap();
-            co2_str = String::from("T: ");
-            co2_str.push_str(&temp_string).unwrap();
-            co2_str.push_str("C").unwrap();
-            Text::with_baseline(co2_str.as_str(), TEMP_POS, text_style, Baseline::Top)
+            Text::with_baseline(temp_str.as_str(), TEMP_POS, clearing_text_style, Baseline::Top)
+                    .draw(&mut raw_fb)
+                    .unwrap();
+            temp_str = String::from("");
+            temp_str.push_str(&temp_string).unwrap();
+            temp_str.push_str("°C").unwrap();
+            Text::with_baseline(temp_str.as_str(), TEMP_POS, text_style, Baseline::Top)
                     .draw(&mut raw_fb)
                     .unwrap();
 
             let mut temp_string = String::<4>::new();
             write!(temp_string, "{:.*}", 1, measurement.humidity).unwrap();
-            co2_str = String::from("HUM: ");
-            co2_str.push_str(&temp_string).unwrap();
-            co2_str.push_str("%").unwrap();
-            Text::with_baseline(co2_str.as_str(), HUM_POS, text_style, Baseline::Top)
+            Text::with_baseline(hum_str.as_str(), HUM_POS, clearing_text_style, Baseline::Top)
+                    .draw(&mut raw_fb)
+                    .unwrap();
+            hum_str = String::from("");
+            hum_str.push_str(&temp_string).unwrap();
+            hum_str.push_str("%").unwrap();
+            Text::with_baseline(hum_str.as_str(), HUM_POS, text_style, Baseline::Top)
                     .draw(&mut raw_fb)
                     .unwrap();
         }
