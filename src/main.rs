@@ -21,7 +21,6 @@ use core::f32::consts::PI;
 use defmt::{info, error};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, };
-use embassy_net::{DhcpConfig, Runner, StackResources };
 use embassy_sync::{ blocking_mutex::raw::{NoopRawMutex, CriticalSectionRawMutex}, mutex::Mutex, watch::{Watch, Receiver, Sender}};
 
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -29,26 +28,14 @@ use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use esp_alloc as _;
 use esp_backtrace as _;
 
-use esp_hal::{Blocking, Async};
+use esp_hal::{Async};
 use esp_hal::clock::CpuClock;
 use esp_hal::spi::{Mode, master::{Config, Spi}};
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::{
-    rng::Rng,
-    ram
-};
+
 use esp_hal::{i2c::master::I2c};
 use esp_println as _;
-use esp_radio::wifi::{ClientConfig, PowerSaveMode, WifiStaState};
-use esp_radio::{
-    wifi::{
-        ModeConfig,
-        WifiController,
-        WifiDevice,
-        WifiEvent,
-    },
-};
-use esp_hal::system::software_reset;
+
 
 use libscd::asynchronous::scd4x::Scd4x;
 
@@ -161,44 +148,12 @@ async fn main(spawner: Spawner) -> ! {
     // Create a signal to send the sensor's reading
     static SENSOR_VALUE: Watch<CriticalSectionRawMutex, Measurement, 1> = Watch::new();
 
-    // Configure Wifi
-    esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 36 * 1024);
-    static RADIO_CTRL: StaticCell<esp_radio::Controller> = StaticCell::new();
-    static NETWRK_STACK:StaticCell<StackResources<3>> = StaticCell::new();
-
-    let radio_init = RADIO_CTRL.init(esp_radio::init().expect("Failed to init Wifi"));
-    let (controller, interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
-        .expect("Failed to create new wifi controller/interface");
-    let wifi_iface = interfaces.sta;
-    
-    let dhcpv4_config = embassy_net::Config::dhcpv4(DhcpConfig::default());
-
-    let rng = Rng::new();
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-    let tls_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
-
-    // Init network stack
-    let (stack, runner) = embassy_net::new(
-        wifi_iface,
-        dhcpv4_config,
-        NETWRK_STACK.init(StackResources::<3>::new()),
-        seed,
-    );
-
     static CLOCK: StaticCell<Clock> = StaticCell::new();
     let clock = CLOCK.init(Clock::new());
 
     // Spawn tasks
     spawner.must_spawn(display_task(display, clock, SENSOR_VALUE.receiver().expect("Unable to create reiever")));
-    //spawner.must_spawn(connection(controller));
-    //spawner.must_spawn(net_task(runner));
     spawner.must_spawn(sensor_read_task(scd, SENSOR_VALUE.sender()));
-
-    wait_for_connection(stack).await;
-
-    spawner.must_spawn(ntp_worker(stack, clock, tls_seed));
 
     loop {
         Timer::after_secs(300).await;
@@ -303,7 +258,7 @@ async fn display_task(
         // Update the sensor reading values
         if sensor_reading.try_changed().is_some() 
         {
-            Rectangle::new(C02_POS, Size { width: 100, height: 56 })
+            Rectangle::new(C02_POS, Size { width: 120, height: 56 })
                 .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
                 .draw(&mut raw_fb).expect("Unable to draw rect");
 
@@ -361,79 +316,6 @@ async fn display_task(
 // Create a point representing an offset from the top-left of a circle to its center
 fn convert_tl_to_center(d: i32) -> Point {
     Point::new(d/2, d/2)
-}
-
-#[embassy_executor::task]
-async fn connection(mut controller: WifiController<'static>) {
-    info!("start connection task");
-    controller.set_power_saving(PowerSaveMode::Maximum).expect("Unable to raise power saving mode");
-    loop {
-        match esp_radio::wifi::sta_state() {
-            WifiStaState::Connected => {
-                // wait until we're no longer connected
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                Timer::after(Duration::from_millis(5000)).await;
-            }
-            _ => {}
-        }
-        if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = ModeConfig::Client(
-                ClientConfig::default()
-                    .with_ssid(SSID.into())
-                    .with_password(PASSWORD.into()),
-            );
-            if let Err(res) = controller.set_config(&client_config) {
-                error!("Wifi config returned: {:?}", res);
-            }
-            if let Err(res) = controller.start_async().await {
-                error!("Wifi startup returned: {:?}", res);
-            }
-        }
-        info!("About to connect....");
-
-        match controller.connect_async().await {
-            Ok(_) => info!("Wifi connected!"),
-            Err(e) => {
-                info!("Failed to connect to wifi: {:?}", e);
-                Timer::after(Duration::from_millis(5000)).await
-            }
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
-    runner.run().await
-}
-
-async fn wait_for_connection(stack: embassy_net::Stack<'_>) {
-    let mut timeout = 600;
-
-    info!("Waiting for link to be up");
-    loop {
-        if stack.is_link_up() {
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-        timeout -= 1;
-        if timeout == 0 {
-            software_reset();
-        }
-    }
-
-    let mut timeout = 600;
-    info!("Waiting to get IP Addr");
-    loop {
-        if let Some(config) = stack.config_v4() {
-            info!("Got IP: {}", config.address);
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-        timeout -= 1;
-        if timeout == 0 {
-            software_reset();
-        }
-    }
 }
 
 // This task reads the C02 sensor and sends the value to the supplied watch::Sender
